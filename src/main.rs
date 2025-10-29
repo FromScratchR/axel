@@ -1,7 +1,7 @@
-use std::{env, ffi::CString, fs, path::PathBuf, process::Command};
+use std::{env, ffi::CString, fs, path::PathBuf};
 
 use anyhow::{bail, Context};
-use nix::{mount::{mount, MsFlags}, sched::{unshare, CloneFlags}, sys::wait::waitpid, unistd::{execve, fork, pivot_root, sethostname, ForkResult}};
+use nix::{mount::{mount, umount2, MntFlags, MsFlags}, sched::{unshare, CloneFlags}, sys::wait::waitpid, unistd::{execve, fork, pivot_root, sethostname, ForkResult}};
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -226,7 +226,7 @@ fn run_container(container_id: &str, config: ImageConfig) -> anyhow::Result<()> 
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child, .. }) => {
-            println!("-> Container PID from Parent: {}", child);
+            println!("-> Container Child PID from Parent: {}", child);
 
             let pid = child.to_string();
             println!("[PARENT] Waiting for child {}...", pid);
@@ -259,8 +259,7 @@ fn run_container(container_id: &str, config: ImageConfig) -> anyhow::Result<()> 
 
 
 fn mount_fs(container_id: &str, config: &ImageConfig) -> anyhow::Result<()> {
-    // OverlayFS integration
-    let container_root = PathBuf::from(format!("./woody-image/{}", container_id));
+    let container_root = fs::canonicalize(format!("./woody-image/{}", container_id))?;
     let rootfs = container_root.join("rootfs");
     let upperdir = container_root.join("upper");
     let workdir = container_root.join("work");
@@ -268,19 +267,10 @@ fn mount_fs(container_id: &str, config: &ImageConfig) -> anyhow::Result<()> {
     fs::create_dir_all(&upperdir)?;
     fs::create_dir_all(&workdir)?;
     fs::create_dir_all(&merged)?;
-    println!("[Container] Created overlayFS dirs.");
+    println!("[Container] Created base overlayFS dirs.");
 
-    
-    std::env::set_current_dir(&rootfs)?;
-    println!("[Container] Initializing container on: {:?}", std::env::current_dir().unwrap());
-
-    // mount(
-    //     None::<&str>,
-    //     "/",
-    //     None::<&str>,
-    //     MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-    //     None::<&str>,
-    // ).context("Failed to make root mount private")?;
+    mount(None::<&str>, "/", None::<&str>, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None::<&str>)
+        .context("Failed to make root mount private")?;
 
     let mount_opts = format!(
         "lowerdir={},upperdir={},workdir={}",
@@ -288,21 +278,25 @@ fn mount_fs(container_id: &str, config: &ImageConfig) -> anyhow::Result<()> {
         upperdir.to_str().unwrap(),
         workdir.to_str().unwrap(),
     );
+    println!("[Container] Mounting overlayfs to {:?}", &merged);
+    mount(Some("overlay"), &merged, Some("overlay"), MsFlags::empty(), Some(mount_opts.as_str()))
+        .context("Failed to mount overlayfs")?;
 
-    // Use merge dir as hub for upper and lower dirs
-    mount(
-        Some("overlay"),
-        &merged,
-        Some("overlay"),
-        MsFlags::empty(),
-        Some(mount_opts.as_str())
-    ).context("Failed to mount overlayfs")?;
+    println!("[Container] Changing CWD to {:?}", &merged);
+    env::set_current_dir(&merged).context("Failed to cd into new root")?;
 
-    nix::unistd::chroot(".")?;
-    println!("[Container] Root changed.");
+    println!("[Container] Pivoting root and stacking old root at /");
+    pivot_root(".", ".").context("pivot_root(.,.) failed")?;
+
+    println!("[Container] Unmounting stacked old root at /");
+    umount2("/", MntFlags::MNT_DETACH).context("Failed to unmount old root")?;
+    
+    env::set_current_dir("/").context("Failed to change directory to new root")?;
 
     let work_dir = &config.config.working_dir;
-    if !work_dir.is_empty() {
+    if !work_dir.is_empty() && work_dir != "/" {
+        println!("[Container] Setting working directory to {}", work_dir);
+        fs::create_dir_all(work_dir)?;
         env::set_current_dir(work_dir).context(format!("Failed to change to working directory: {}", work_dir))?;
     }
 
@@ -329,29 +323,10 @@ fn exec_command(config: ImageConfig) -> anyhow::Result<()> {
         .map(|s| CString::new(s.as_bytes()).unwrap())
         .collect();
 
-    dbg!(&command_c);
-    dbg!(&args_c);
-    dbg!(&env_c);
-
     println!("-> Executing command: {:?}", &args);
     execve(&command_c, &args_c, &env_c)
         .expect("execve failed.");
 
     Ok(())
 }
-
-//
-//
-// pub type ActionResult = std::result::Result<(), Box<dyn std::error::Error>>;
-//
-// fn main() {
-//     let config = ContainerConfig {
-//         command: vec!["/bin/bash".to_string()],
-//         args: vec![],
-//         rootfs: "./container/".to_string(),
-//     };
-//
-//     let container = Container::new(config);
-//     container.run();
-// }
 
