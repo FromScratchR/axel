@@ -60,7 +60,6 @@ struct ImageConfig {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct ConfigDetails {
-    // Can be null, thats why option
     cmd: Option<Vec<String>>,
     entrypoint: Option<Vec<String>>,
     env: Vec<String>,
@@ -81,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let image_ref = &args[1];
     println!("-> Pulling image: {}", image_ref);
 
-    let container_id = "image-container";
+    let container_id = &args[1];
     let base_path = PathBuf::from(format!("./woody-image/{}", container_id));
     // idempotency WOW
     if base_path.exists() {
@@ -107,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .token;
 
-    // SECTION
+    // !SECTION
 
 
     // Get image specification / options before downloading the containers
