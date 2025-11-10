@@ -1,25 +1,49 @@
-use std::{env, ffi::CString, fs::{self, canonicalize, File}, io::Write as _, path::PathBuf, str::FromStr};
+use std::{ffi::CString, fs::{self, canonicalize, File}, io::Write, path::PathBuf};
+
 use anyhow::{bail, Context};
-use nix::{mount::{mount, umount2, MntFlags, MsFlags}, sched::{clone, unshare, CloneFlags}, sys::wait::waitpid, unistd::{close, execv, execve, fork, getgid, getuid, pivot_root, read, setgid, sethostname, setuid, write, Gid, Uid}};
-use serde::Deserialize;
+use clap::Parser;
+use nix::{mount::{mount, umount2, MntFlags, MsFlags}, sched::{clone, unshare, CloneFlags}, sys::wait::waitpid, unistd::{close, execve, getgid, getuid, pivot_root, read, setgid, setuid, write, Gid, Uid}};
+use serde::{Deserialize, Serialize};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Parser, Debug)]
+enum Commands {
+    /// Run a command in a new container
+    Run {
+        /// The image to run, e.g., alpine:latest
+        image: String,
+    },
+    List,
+    /// Stop a running container
+    Stop {
+        /// The ID of the container to stop
+        container_id: String,
+    },
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum GenericManifest {
     ManifestList(ManifestList),
-    ImageManifest(Manifest)
+    ImageManifest(Manifest),
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ManifestList {
-    manifests: Vec<ManifestListItem>
+    manifests: Vec<ManifestListItem>,
 }
 
 #[derive(Deserialize, Debug)]
 struct ManifestListItem {
     digest: String,
-    platform: Platform
+    platform: Platform,
 }
 
 #[derive(Deserialize, Debug)]
@@ -37,20 +61,20 @@ struct AuthResponse {
 #[serde(rename_all = "camelCase")]
 struct Manifest {
     config: Digest,
-    layers: Vec<Digest>
+    layers: Vec<Digest>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Digest {
-    digest: String
+    digest: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct ImageConfig {
-    config: ConfigDetails
+    config: ConfigDetails,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 struct ConfigDetails {
     cmd: Option<Vec<String>>,
@@ -62,58 +86,128 @@ struct ConfigDetails {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = std::env::args().collect::<Vec<String>>();
+    let cli = Cli::parse();
 
-    if args.len() < 2 {
-        eprintln!("Usage: {} <image:tag>", args[0]);
-
-        return Ok(());
+    match cli.command {
+        Commands::Run { image } => {
+            run_container(&image).await?;
+        }
+        Commands::List => {
+            list_containers()
+        }
+        Commands::Stop {
+            container_id
+        } => {
+            stop_container(&container_id)?;
+        }
     }
 
-    let image_ref = &args[1];
+    Ok(())
+}
 
-    println!("-> Pulling image: {}", image_ref);
+fn list_containers() {
+    let pids_path = PathBuf::from("./woody-pids");
 
+    if let Ok(entries) = fs::read_dir(pids_path) {
+        for entry in entries {
+            match entry {
+                Ok(file) => {
+                    let file_name = file.file_name().into_string().unwrap();
+
+
+                    let pid = &fs::read(file.path()).unwrap();
+
+                    println!("[{}] - {}", file_name, std::str::from_utf8(pid).unwrap());
+                }
+                Err(e) => {
+                    panic!("Could not open entry {}", e);
+                }
+            }
+        }
+    };
+}
+
+fn stop_container(container_id: &str) -> anyhow::Result<()> {
+    let container_name = container_id.replace(":", "-");
+    println!("-> Stopping container: {}", container_name);
+
+    let pids_dir = PathBuf::from("./woody-pids");
+    let pid_file_path = pids_dir.join(format!("{}.pid", container_name));
+
+    if !pid_file_path.exists() {
+        bail!("Container '{}' is not running or PID file not found.", container_name);
+    }
+
+    let pid_str = fs::read_to_string(&pid_file_path)?;
+    let pid = nix::unistd::Pid::from_raw(pid_str.trim().parse::<i32>()?);
+
+    // Kill the container process
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL)?;
+    println!("[Parent] Sent SIGKILL to PID {}", pid);
+
+    // Wait for the process to be reaped to avoid zombies
+    let wait_status = waitpid(pid, None);
+    println!("[Parent] Container process reaped with status: {:?}", wait_status);
+
+    // Unmount overlayfs
+    let merged_path = PathBuf::from(format!("./woody-images/{}/merged", container_name));
+    println!("[Parent] Unmounting {:?}", merged_path);
+    umount2(&merged_path, MntFlags::MNT_DETACH).context("Failed to unmount overlay FS")?;
+
+    // Clean up PID file
+    fs::remove_file(&pid_file_path)?;
+
+    println!("-> Container '{}' stopped successfully.", container_name);
+
+    Ok(())
+}
+
+
+async fn run_container(image_ref: &str) -> anyhow::Result<()> {
     let container_name = image_ref.replace(":", "-");
-
     let base_path = PathBuf::from(format!("./woody-images/{}", container_name));
+    let rootfs_path = base_path.join("rootfs");
 
-    if base_path.exists() {
-        fs::remove_dir_all(&base_path)?;
+    let config: ConfigDetails;
+
+    if rootfs_path.exists() && fs::read_dir(&rootfs_path)?.next().is_some() {
+        println!("-> Using cached image: {}", image_ref);
+        let config_path = base_path.join("config.json");
+        let config_json = fs::read_to_string(config_path)?;
+        config = serde_json::from_str(&config_json)?;
+    } else {
+        println!("-> Pulling image: {}", image_ref);
+        if base_path.exists() {
+            fs::remove_dir_all(&base_path)?;
+        }
+        fs::create_dir_all(&base_path)?;
+
+        let (image_name, tag) = parse_image_name(image_ref);
+        let client = reqwest::Client::new();
+        let auth_url = format!(
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
+            image_name
+        );
+        let token = client
+            .get(&auth_url)
+            .send().await?
+            .json::<AuthResponse>()
+            .await?
+            .token;
+
+        let (manifest, fetched_config) = fetch_image_manifest(&image_name, &tag, &token, &client).await?;
+        config = fetched_config.config;
+
+        let config_path = base_path.join("config.json");
+        let config_json = serde_json::to_string(&config)?;
+        fs::write(config_path, config_json)?;
+
+        fs::create_dir_all(&rootfs_path)?;
+        println!("-> Assembling rootfs at: {}", rootfs_path.to_str().unwrap());
+        download_and_unpack_layers(&image_name, &token, &manifest.layers, rootfs_path.to_str().unwrap(), &client).await?;
     }
-    fs::create_dir_all(&base_path)?;
 
-    // SECTION image name parsing / token acquisition
-
-    let (image_name, tag) = parse_image_name(image_ref);
-
-    let client = reqwest::Client::new();
-
-    let auth_url = format!(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
-        image_name
-    );
-
-    let token = client
-        .get(&auth_url)
-        .send().await?
-        .json::<AuthResponse>()
-        .await?
-        .token;
-
-    // !SECTION
-
-    // Get image specification / options before downloading the containers
-    let (manifest, config) = fetch_image_manifest(&image_name, &tag, &token, &client).await?;
-
-    let rootfs_path = format!("./woody-images/{}/rootfs", container_name);
-    fs::create_dir_all(&rootfs_path)?;
-
-    println!("-> Assembling rootfs at: {}", &rootfs_path);
-    download_and_unpack_layers(&image_name, &token, &manifest.layers, &rootfs_path, &client).await?;
-
-    spawn_container(&container_name, &config.config);
-
+    spawn_container(&container_name, &config);
     Ok(())
 }
 
@@ -157,9 +251,6 @@ async fn fetch_image_manifest(
             .find(|m| m.platform.os == "linux" && m.platform.architecture == "amd64")
             .context("Could not find linux/amd64 manifest in the list")?;
 
-            #[cfg(feature = "debug-reqs")]
-            dbg!(amd64_manifest);
-
             final_manifest_digest = amd64_manifest.digest.clone();
             let manifest_url = format!("https://registry-1.docker.io/v2/{}/manifests/{}", image_name, final_manifest_digest);
             final_manifest = client
@@ -179,9 +270,6 @@ async fn fetch_image_manifest(
         .bearer_auth(&token)
         .send().await?
         .json().await?;
-
-    #[cfg(feature = "debug-reqs")]
-    dbg!(config);
 
     Ok((final_manifest, config))
 }
@@ -224,8 +312,8 @@ fn spawn_container(container_name: &str, config: &ConfigDetails) {
     const STACK_SIZE: usize = 1024 * 1024; // 1 MB;
     let mut stack = vec![0; STACK_SIZE];
 
-    // Child entrypoint
-    let child_fn = || child_main(pipe_read_fd, pipe_write_fd, container_name, &config);
+    let cloned_config = config.clone();
+    let child_fn = move || child_main(pipe_read_fd, pipe_write_fd, container_name, &cloned_config);
 
     // Clone with NEWUSER
     let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
@@ -236,6 +324,13 @@ fn spawn_container(container_name: &str, config: &ConfigDetails) {
         Some(nix::sys::signal::Signal::SIGCHLD as i32),
     )
     .expect("[Parent] clone() failed");
+
+    // Save PID to file
+    let pids_dir = PathBuf::from("./woody-pids");
+    fs::create_dir_all(&pids_dir).expect("Could not create pids directory");
+    let pid_file_path = pids_dir.join(format!("{}.pid", container_name));
+    fs::write(pid_file_path, child_pid.to_string()).expect("Could not write PID file");
+
 
     println!("[Parent] Cloned child with PID: {}", child_pid);
 
@@ -268,19 +363,9 @@ fn spawn_container(container_name: &str, config: &ConfigDetails) {
     write(pipe_write_fd, &[1]).expect("[Parent] write to pipe failed");
     close(pipe_write_fd).unwrap();
 
-    // Wait for the child to exit
-    waitpid(child_pid, None).expect("Parent: waitpid failed");
-    println!("[Parent] Child has exited.");
-
-    // Unmount fuse-overlayfs
-    let merged_path = format!("./woody-images/{}/merged", container_name);
-    println!("[Parent] Unmounting {}", merged_path);
-    let mut fusermount_cmd = std::process::Command::new("fusermount3");
-    fusermount_cmd.arg("-u").arg(&merged_path);
-    let cmd_status = fusermount_cmd.status().expect("Failed to execute fusermount3");
-    if !cmd_status.success() {
-        eprintln!("[Parent] Warning: failed to unmount {}", merged_path);
-    }
+    // Detach from the child process, allowing it to run in the background
+    println!("[Parent] Detaching from child process. Container is running in the background.");
+    println!("[Parent] To stop the container, run: woody stop {}", container_name);
 }
 
 fn child_main(pipe_read_fd: i32, pipe_write_fd: i32, container_name: &str, config: &ConfigDetails) -> isize {
@@ -324,13 +409,6 @@ fn configure_fs(container_name: &str) -> anyhow::Result<()> {
     cd(&work)?;
     cd(&merged)?;
     println!("[Child] Created base directories for overlay.");
-
-    println!("[Child] --- Path Check ---");
-    println!("[Child] base:   {:?}", base);
-    println!("[Child] merged: {:?}", merged);
-    println!("[Child] upper:  {:?}", upper);
-    println!("[Child] work:   {:?}", work);
-    println!("[Child] rootfs: {:?}", rootfs);
 
     // 4. Mount / as private
     mount(
