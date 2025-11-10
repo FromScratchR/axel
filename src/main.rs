@@ -1,8 +1,6 @@
-use std::{env, ffi::CString, fs::{self, canonicalize, File}, io::Write as _, path::PathBuf};
-
+use std::{env, ffi::CString, fs::{self, canonicalize, File}, io::Write as _, path::PathBuf, str::FromStr};
 use anyhow::{bail, Context};
-use libc::MS_REC;
-use nix::{mount::{mount, umount2, MntFlags, MsFlags}, sched::{clone, unshare, CloneFlags}, sys::wait::waitpid, unistd::{close, execv, execve, fork, getgid, getuid, pivot_root, read, setgid, sethostname, setuid, write, ForkResult, Gid, Uid}};
+use nix::{mount::{mount, umount2, MntFlags, MsFlags}, sched::{clone, unshare, CloneFlags}, sys::wait::waitpid, unistd::{close, execv, execve, fork, getgid, getuid, pivot_root, read, setgid, sethostname, setuid, write, Gid, Uid}};
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -15,8 +13,6 @@ enum GenericManifest {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ManifestList {
-    schema_version: u32,
-    media_type: String,
     manifests: Vec<ManifestListItem>
 }
 
@@ -40,8 +36,6 @@ struct AuthResponse {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
-    schema_version: u32,
-    media_type: String,
     config: Digest,
     layers: Vec<Digest>
 }
@@ -53,8 +47,6 @@ struct Digest {
 
 #[derive(Deserialize, Debug)]
 struct ImageConfig {
-    architecture: String,
-    os: String,
     config: ConfigDetails
 }
 
@@ -70,10 +62,6 @@ struct ConfigDetails {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if !nix::unistd::geteuid().is_root() {
-        bail!("You must run this program as root. Try with sudo.");
-    }
-
     let args = std::env::args().collect::<Vec<String>>();
 
     if args.len() < 2 {
@@ -86,15 +74,14 @@ async fn main() -> anyhow::Result<()> {
 
     println!("-> Pulling image: {}", image_ref);
 
-    let container_name = &args[1];
+    let container_name = image_ref.replace(":", "-");
 
     let base_path = PathBuf::from(format!("./woody-images/{}", container_name));
 
     if base_path.exists() {
         fs::remove_dir_all(&base_path)?;
     }
-
-    fs::create_dir_all(format!("./woody-images/{}", container_name))?;
+    fs::create_dir_all(&base_path)?;
 
     // SECTION image name parsing / token acquisition
 
@@ -125,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     println!("-> Assembling rootfs at: {}", &rootfs_path);
     download_and_unpack_layers(&image_name, &token, &manifest.layers, &rootfs_path, &client).await?;
 
-    spawn_container(&container_name);
+    spawn_container(&container_name, &config.config);
 
     Ok(())
 }
@@ -225,7 +212,7 @@ async fn download_and_unpack_layers(
     Ok(())
 }
 
-fn spawn_container(container_name: &str) {
+fn spawn_container(container_name: &str, config: &ConfigDetails) {
     let host_uid = getuid().as_raw();
     let host_gid = getgid().as_raw();
 
@@ -238,7 +225,7 @@ fn spawn_container(container_name: &str) {
     let mut stack = vec![0; STACK_SIZE];
 
     // Child entrypoint
-    let child_fn = || child_main(pipe_read_fd, container_name);
+    let child_fn = || child_main(pipe_read_fd, pipe_write_fd, container_name, &config);
 
     // Clone with NEWUSER
     let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
@@ -284,13 +271,28 @@ fn spawn_container(container_name: &str) {
     // Wait for the child to exit
     waitpid(child_pid, None).expect("Parent: waitpid failed");
     println!("[Parent] Child has exited.");
+
+    // Unmount fuse-overlayfs
+    let merged_path = format!("./woody-images/{}/merged", container_name);
+    println!("[Parent] Unmounting {}", merged_path);
+    let mut fusermount_cmd = std::process::Command::new("fusermount3");
+    fusermount_cmd.arg("-u").arg(&merged_path);
+    let cmd_status = fusermount_cmd.status().expect("Failed to execute fusermount3");
+    if !cmd_status.success() {
+        eprintln!("[Parent] Warning: failed to unmount {}", merged_path);
+    }
 }
 
-fn child_main(pipe_read_fd: i32, container_name: &str) -> isize {
+fn child_main(pipe_read_fd: i32, pipe_write_fd: i32, container_name: &str, config: &ConfigDetails) -> isize {
+    close(pipe_write_fd).unwrap();
+
+    // wait for uid/gid parent set
     wait_for_parent(pipe_read_fd);
 
-    configure_fs(container_name);
-    exec_command();
+    // overlayfs
+    configure_fs(container_name).expect("Error configuring fs");
+
+    exec(config);
 
     0
 }
@@ -305,42 +307,42 @@ fn wait_for_parent(pipe_read_fd: i32) {
 
     setuid(Uid::from_raw(0)).expect("[Child] setuid(0) failed");
     setgid(Gid::from_raw(0)).expect("[Child] setgid(0) failed");
-
 }
 
-fn configure_fs(container_name: &str) {
+fn configure_fs(container_name: &str) -> anyhow::Result<()> {
     use std::fs::create_dir_all as cd;
-    use std::process::Command;
 
-    let canonical_path = canonicalize(format!("./woody-images/{}", container_name)).unwrap();
-    let rootfs = canonical_path.join("rootfs");
-    let upper = canonical_path.join("upper");
-    let work = canonical_path.join("work");
-    let merged = canonical_path.join("merged");
+    // 1. Create paths
+    let base = canonicalize(format!("./woody-images/{}", container_name))?;
+    let rootfs = base.join("rootfs");
+    let upper = base.join("upper");
+    let work = base.join("work");
+    let merged = base.join("merged");
 
-    cd(&upper).unwrap();
-    cd(&work).unwrap();
-    cd(&merged).unwrap();
+    // rootfs is already created
+    cd(&upper)?;
+    cd(&work)?;
+    cd(&merged)?;
+    println!("[Child] Created base directories for overlay.");
 
-    println!("[Child] Created base directories.");
+    println!("[Child] --- Path Check ---");
+    println!("[Child] base:   {:?}", base);
+    println!("[Child] merged: {:?}", merged);
+    println!("[Child] upper:  {:?}", upper);
+    println!("[Child] work:   {:?}", work);
+    println!("[Child] rootfs: {:?}", rootfs);
 
-    let output = Command::new("ls")
-        .arg("-l")
-        .arg(&canonical_path)
-        .output()
-        .expect("failed to execute ls");
-    println!("[Child] ls -l of container dir: {:?}", String::from_utf8_lossy(&output.stdout));
-
+    // 4. Mount / as private
     mount(
         None::<&str>,
         "/",
         None::<&str>,
         MsFlags::MS_REC | MsFlags::MS_PRIVATE,
         None::<&str>,
-    ).context("Failed to mount '/' container fs.").unwrap();
+    ).context("Failed to mount '/' container fs.")?;
     println!("[Child] Mounted '/'");
 
-
+    // 5. Attempt overlayfs mount
     let mount_opts = format!(
         "lowerdir={},upperdir={},workdir={}",
         rootfs.to_str().unwrap(),
@@ -354,138 +356,56 @@ fn configure_fs(container_name: &str) {
         Some("overlay"),
         MsFlags::empty(),
         Some(mount_opts.as_str())
-    ).context("Could not mount overlay fs.").unwrap();
+    ).context("Could not mount overlay fs.")?;
     println!("[Child] Created overlayFS.");
 
-    std::env::set_current_dir(&merged)
-        .context("[Child] Could not change cwd")
-        .unwrap();
+    std::env::set_current_dir(&merged).context("[Child] Could not change cwd")?;
     println!("[Child] Changed cwd.");
 
-    pivot_root(".", ".")
-        .context("[Child] Could not pivot root").unwrap();
+    pivot_root(".", ".").context("[Child] Could not pivot root")?;
     println!("[Child] Pivoted root.");
 
-
-    umount2("/", MntFlags::MNT_DETACH)
-        .context("[Child] Could not unmount stacked fs")
-        .unwrap();
+    umount2("/", MntFlags::MNT_DETACH).context("[Child] Could not unmount stacked fs")?;
     println!("[Child] Isolated environment.");
+
+    Ok(())
 }
 
-fn exec_command() {
+fn exec(config: &ConfigDetails) {
     println!("[Child] Executing commands...");
+
+    dbg!(config);
+
+    // Set working directory
+    if !config.working_dir.is_empty() {
+        std::env::set_current_dir(&config.working_dir)
+            .expect("Could not set working directory");
+    }
+
+    // Prepare environment variables
+    let env_vars: Vec<CString> = config.env
+        .iter()
+        .map(|e| CString::new(e.clone()).unwrap())
+        .collect();
+
+    let mut command_args: Vec<CString> = Vec::new();
+
+    // Determine the command and arguments
+    if let Some(entrypoint) = &config.entrypoint {
+        command_args.extend(entrypoint.iter().map(|s| CString::new(s.clone()).unwrap()));
+        if let Some(cmd) = &config.cmd {
+            command_args.extend(cmd.iter().map(|s| CString::new(s.clone()).unwrap()));
+        }
+    } else if let Some(cmd) = &config.cmd {
+        command_args.extend(cmd.iter().map(|s| CString::new(s.clone()).unwrap()));
+    } else {
+        panic!("No command or entrypoint specified in config");
+    }
+
+    if command_args.is_empty() {
+        panic!("Command arguments are empty");
+    }
+
+    let program = command_args[0].clone();
+    nix::unistd::execve(&program, &command_args, &env_vars).expect("Could not exec command");
 }
-
-// fn run_container(container_id: &str, config: ImageConfig) -> anyhow::Result<()> {
-//     if !nix::unistd::geteuid().is_root() {
-//         bail!("You must run this program as root. Try with sudo.");
-//     }
-//
-//     match unsafe { fork() } {
-//         Ok(ForkResult::Parent { child, .. }) => {
-//             println!("-> Container Child PID from Parent: {}", child);
-//
-//             let pid = child.to_string();
-//             println!("[PARENT] Waiting for child {}...", pid);
-//
-//             let status = waitpid(child, None)?;
-//             println!("-> Container exited with status: {:?}", status);
-//         }
-//         Ok(ForkResult::Child) => {
-//             let flags = CloneFlags::CLONE_NEWNS |
-//                         CloneFlags::CLONE_NEWUTS |
-//                         CloneFlags::CLONE_NEWIPC |
-//                         CloneFlags::CLONE_NEWNET;
-//
-//             unshare(flags).context("Failed to unshare namespaces")?;
-//
-//             mount_fs(container_id, &config).context("Could not mount fs.")?;
-//
-//             sethostname("woody-image").context("Failed to set hostname.")?;
-//
-//             exec_command(config).context("Failed to exec command.")?;
-//
-//         }
-//         Err(e) => {
-//             bail!("Fork failed: {}", e);
-//         }
-//     }
-//
-//     Ok(())
-// }
-
-//
-//
-// fn mount_fs(container_id: &str, config: &ImageConfig) -> anyhow::Result<()> {
-//     let container_root = fs::canonicalize(format!("./woody-image/{}", container_id))?;
-//     let rootfs = container_root.join("rootfs");
-//     let upperdir = container_root.join("upper");
-//     let workdir = container_root.join("work");
-//     let merged = container_root.join("merged");
-//     fs::create_dir_all(&upperdir)?;
-//     fs::create_dir_all(&workdir)?;
-//     fs::create_dir_all(&merged)?;
-//     println!("[Container] Created base overlayFS dirs.");
-//
-//     mount(None::<&str>, "/", None::<&str>, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None::<&str>)
-//         .context("Failed to make root mount private")?;
-//
-//     let mount_opts = format!(
-//         "lowerdir={},upperdir={},workdir={}",
-//         rootfs.to_str().unwrap(),
-//         upperdir.to_str().unwrap(),
-//         workdir.to_str().unwrap(),
-//     );
-//     println!("[Container] Mounting overlayfs to {:?}", &merged);
-//     mount(Some("overlay"), &merged, Some("overlay"), MsFlags::empty(), Some(mount_opts.as_str()))
-//         .context("Failed to mount overlayfs")?;
-//
-//     println!("[Container] Changing CWD to {:?}", &merged);
-//     env::set_current_dir(&merged).context("Failed to cd into new root")?;
-//
-//     println!("[Container] Pivoting root and stacking old root at /");
-//     pivot_root(".", ".").context("pivot_root(.,.) failed")?;
-//
-//     println!("[Container] Unmounting stacked old root at /");
-//     umount2("/", MntFlags::MNT_DETACH).context("Failed to unmount old root")?;
-//
-//     env::set_current_dir("/").context("Failed to change directory to new root")?;
-//
-//     let work_dir = &config.config.working_dir;
-//     if !work_dir.is_empty() && work_dir != "/" {
-//         println!("[Container] Setting working directory to {}", work_dir);
-//         fs::create_dir_all(work_dir)?;
-//         env::set_current_dir(work_dir).context(format!("Failed to change to working directory: {}", work_dir))?;
-//     }
-//
-//     Ok(())
-// }
-//
-// fn exec_command(config: ImageConfig) -> anyhow::Result<()> {
-//     let cmd = config.config.cmd.unwrap_or_default();
-//     let entrypoint = config.config.entrypoint.unwrap_or_default();
-//
-//     let (command, args) = if !entrypoint.is_empty() {
-//         (entrypoint[0].clone(), entrypoint)
-//     } else if !cmd.is_empty() {
-//         (cmd[0].clone(), cmd)
-//     } else {
-//         bail!("Image has no entrypoint or command specified");
-//     };
-//
-//     let command_c = CString::new(command)?;
-//     let args_c: Vec<CString> = args.iter()
-//         .map(|s| CString::new(s.as_bytes()).unwrap())
-//         .collect();
-//     let env_c: Vec<CString> = config.config.env.iter()
-//         .map(|s| CString::new(s.as_bytes()).unwrap())
-//         .collect();
-//
-//     println!("-> Executing command: {:?}", &args);
-//     execve(&command_c, &args_c, &env_c)
-//         .expect("execve failed.");
-//
-//     Ok(())
-// }
-
