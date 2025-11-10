@@ -1,8 +1,18 @@
-use std::{ffi::CString, fs::{self, canonicalize, File}, io::Write, path::PathBuf};
+use std::{
+    ffi::CString,
+    fs::{self, canonicalize, File},
+    io::Write,
+    path::PathBuf,
+};
 
 use anyhow::{bail, Context};
-use clap::Parser;
-use nix::{mount::{mount, umount2, MntFlags, MsFlags}, sched::{clone, unshare, CloneFlags}, sys::wait::waitpid, unistd::{close, execve, getgid, getuid, pivot_root, read, setgid, setuid, write, Gid, Uid}};
+use clap::{arg, Parser};
+use nix::{
+    mount::{mount, umount2, MntFlags, MsFlags},
+    sched::{clone, unshare, CloneFlags},
+    sys::wait::waitpid,
+    unistd::{close, execve, getgid, getuid, pivot_root, read, setgid, setuid, write, Gid, Uid},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -18,6 +28,9 @@ enum Commands {
     Run {
         /// The image to run, e.g., alpine:latest
         image: String,
+        /// Run the container in interactive mode (foreground)
+        #[arg(short, long)]
+        interactive: bool,
     },
     List,
     /// Stop a running container
@@ -89,15 +102,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { image } => {
-            run_container(&image).await?;
+        Commands::Run { image, interactive } => {
+            run_container(&image, interactive).await?;
         }
         Commands::List => {
-            list_containers()
+            list_containers();
         }
-        Commands::Stop {
-            container_id
-        } => {
+        Commands::Stop { container_id } => {
             stop_container(&container_id)?;
         }
     }
@@ -113,8 +124,6 @@ fn list_containers() {
             match entry {
                 Ok(file) => {
                     let file_name = file.file_name().into_string().unwrap();
-
-
                     let pid = &fs::read(file.path()).unwrap();
 
                     println!("[{}] - {}", file_name, std::str::from_utf8(pid).unwrap());
@@ -135,7 +144,10 @@ fn stop_container(container_id: &str) -> anyhow::Result<()> {
     let pid_file_path = pids_dir.join(format!("{}.pid", container_name));
 
     if !pid_file_path.exists() {
-        bail!("Container '{}' is not running or PID file not found.", container_name);
+        bail!(
+            "Container '{}' is not running or PID file not found.",
+            container_name
+        );
     }
 
     let pid_str = fs::read_to_string(&pid_file_path)?;
@@ -147,7 +159,10 @@ fn stop_container(container_id: &str) -> anyhow::Result<()> {
 
     // Wait for the process to be reaped to avoid zombies
     let wait_status = waitpid(pid, None);
-    println!("[Parent] Container process reaped with status: {:?}", wait_status);
+    println!(
+        "[Parent] Container process reaped with status: {:?}",
+        wait_status
+    );
 
     // Unmount overlayfs
     let merged_path = PathBuf::from(format!("./woody-images/{}/merged", container_name));
@@ -162,8 +177,7 @@ fn stop_container(container_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-
-async fn run_container(image_ref: &str) -> anyhow::Result<()> {
+async fn run_container(image_ref: &str, interactive: bool) -> anyhow::Result<()> {
     let container_name = image_ref.replace(":", "-");
     let base_path = PathBuf::from(format!("./woody-images/{}", container_name));
     let rootfs_path = base_path.join("rootfs");
@@ -190,12 +204,14 @@ async fn run_container(image_ref: &str) -> anyhow::Result<()> {
         );
         let token = client
             .get(&auth_url)
-            .send().await?
+            .send()
+            .await?
             .json::<AuthResponse>()
             .await?
             .token;
 
-        let (manifest, fetched_config) = fetch_image_manifest(&image_name, &tag, &token, &client).await?;
+        let (manifest, fetched_config) =
+            fetch_image_manifest(&image_name, &tag, &token, &client).await?;
         config = fetched_config.config;
 
         let config_path = base_path.join("config.json");
@@ -204,17 +220,29 @@ async fn run_container(image_ref: &str) -> anyhow::Result<()> {
 
         fs::create_dir_all(&rootfs_path)?;
         println!("-> Assembling rootfs at: {}", rootfs_path.to_str().unwrap());
-        download_and_unpack_layers(&image_name, &token, &manifest.layers, rootfs_path.to_str().unwrap(), &client).await?;
+        download_and_unpack_layers(
+            &image_name,
+            &token,
+            &manifest.layers,
+            rootfs_path.to_str().unwrap(),
+            &client,
+        )
+        .await?;
     }
 
-    spawn_container(&container_name, &config);
+    spawn_container(&container_name, &config, interactive);
+
     Ok(())
 }
 
 fn parse_image_name(image_ref: &str) -> (String, String) {
     // Image / Tag split parsing
     let (image, tag) = image_ref.split_once(':').unwrap_or((image_ref, "latest"));
-    let image_name = if image.contains('/') { image.to_string() } else { format!("library/{}", image) };
+    let image_name = if image.contains('/') {
+        image.to_string()
+    } else {
+        format!("library/{}", image)
+    };
 
     (image_name.to_owned(), tag.to_owned())
 }
@@ -223,17 +251,25 @@ async fn fetch_image_manifest(
     image_name: &str,
     tag: &str,
     token: &String,
-    client: &reqwest::Client
+    client: &reqwest::Client,
 ) -> anyhow::Result<(Manifest, ImageConfig)> {
     // Manifest get
-    let manifest_url = format!("https://registry-1.docker.io/v2/{}/manifests/{}", image_name, tag);
+    let manifest_url = format!(
+        "https://registry-1.docker.io/v2/{}/manifests/{}",
+        image_name, tag
+    );
 
     let generic_manifest: GenericManifest = client
         .get(&manifest_url)
-        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .header(
+            "Accept",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        )
         .bearer_auth(&token)
-        .send().await?
-        .json().await
+        .send()
+        .await?
+        .json()
+        .await
         .context("Failed to deserialize generic manifest")?;
 
     let final_manifest_digest;
@@ -247,29 +283,44 @@ async fn fetch_image_manifest(
         GenericManifest::ManifestList(list) => {
             println!("-> Found manifest list. Searching for linux/amd64.");
 
-            let amd64_manifest = list.manifests.iter()
-            .find(|m| m.platform.os == "linux" && m.platform.architecture == "amd64")
-            .context("Could not find linux/amd64 manifest in the list")?;
+            let amd64_manifest = list
+                .manifests
+                .iter()
+                .find(|m| m.platform.os == "linux" && m.platform.architecture == "amd64")
+                .context("Could not find linux/amd64 manifest in the list")?;
 
             final_manifest_digest = amd64_manifest.digest.clone();
-            let manifest_url = format!("https://registry-1.docker.io/v2/{}/manifests/{}", image_name, final_manifest_digest);
+            let manifest_url = format!(
+                "https://registry-1.docker.io/v2/{}/manifests/{}",
+                image_name, final_manifest_digest
+            );
             final_manifest = client
                 .get(&manifest_url)
-                .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+                .header(
+                    "Accept",
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                )
                 .bearer_auth(&token)
-                .send().await?
-                .json().await
+                .send()
+                .await?
+                .json()
+                .await
                 .context("Failed to deserialize final image manifest")?;
         }
     }
 
     // Config get
-    let config_url = format!("https://registry-1.docker.io/v2/{}/blobs/{}", image_name, final_manifest.config.digest);
+    let config_url = format!(
+        "https://registry-1.docker.io/v2/{}/blobs/{}",
+        image_name, final_manifest.config.digest
+    );
     let config: ImageConfig = client
         .get(&config_url)
         .bearer_auth(&token)
-        .send().await?
-        .json().await?;
+        .send()
+        .await?
+        .json()
+        .await?;
 
     Ok((final_manifest, config))
 }
@@ -279,16 +330,21 @@ async fn download_and_unpack_layers(
     token: &String,
     layers: &[Digest],
     rootfs_path: &str,
-    client: &reqwest::Client
+    client: &reqwest::Client,
 ) -> anyhow::Result<()> {
     for layer in layers {
         println!("[Woody] Downloading layer {}", &layer.digest[..12]);
-        let layer_url = format!("https://registry-1.docker.io/v2/{}/blobs/{}", image_name, layer.digest);
+        let layer_url = format!(
+            "https://registry-1.docker.io/v2/{}/blobs/{}",
+            image_name, layer.digest
+        );
         let response_bytes = client
             .get(&layer_url)
             .bearer_auth(&token)
-            .send().await?
-            .bytes().await?;
+            .send()
+            .await?
+            .bytes()
+            .await?;
 
         println!("[Woody] Unpacking layer {}", &layer.digest[..12]);
         let tar = flate2::read::GzDecoder::new(&response_bytes[..]);
@@ -300,23 +356,29 @@ async fn download_and_unpack_layers(
     Ok(())
 }
 
-fn spawn_container(container_name: &str, config: &ConfigDetails) {
+fn spawn_container(container_name: &str, config: &ConfigDetails, interactive: bool) {
     let host_uid = getuid().as_raw();
+
     let host_gid = getgid().as_raw();
 
     println!("[Parent] Host UID: {}, Host GID: {}", host_uid, host_gid);
 
     // Pipe for synchronizing parent and child
+
     let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe().unwrap();
 
     const STACK_SIZE: usize = 1024 * 1024; // 1 MB;
+
     let mut stack = vec![0; STACK_SIZE];
 
     let cloned_config = config.clone();
+
     let child_fn = move || child_main(pipe_read_fd, pipe_write_fd, container_name, &cloned_config);
 
     // Clone with NEWUSER
-    let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
+
+    let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
+
     let child_pid = clone(
         Box::new(child_fn),
         &mut stack,
@@ -325,13 +387,6 @@ fn spawn_container(container_name: &str, config: &ConfigDetails) {
     )
     .expect("[Parent] clone() failed");
 
-    // Save PID to file
-    let pids_dir = PathBuf::from("./woody-pids");
-    fs::create_dir_all(&pids_dir).expect("Could not create pids directory");
-    let pid_file_path = pids_dir.join(format!("{}.pid", container_name));
-    fs::write(pid_file_path, child_pid.to_string()).expect("Could not write PID file");
-
-
     println!("[Parent] Cloned child with PID: {}", child_pid);
 
     close(pipe_read_fd).unwrap();
@@ -339,40 +394,95 @@ fn spawn_container(container_name: &str, config: &ConfigDetails) {
     println!("[Parent] Writing map files for child {}", child_pid);
 
     // Deny setgroups
-    let mut setgroups_file = File::create(format!("/proc/{}/setgroups", child_pid))
-        .expect("Failed to open setgroups");
-    setgroups_file.write_all(b"deny")
+
+    let mut setgroups_file =
+        File::create(format!("/proc/{}/setgroups", child_pid)).expect("Failed to open setgroups");
+
+    setgroups_file
+        .write_all(b"deny")
         .expect("Failed to write setgroups");
 
     // Write UID map
-    let mut uid_map_file = File::create(format!("/proc/{}/uid_map", child_pid))
-        .expect("Failed to open uid_map");
-    uid_map_file.write_all(format!("0 {} 1", host_uid).as_bytes())
+
+    let mut uid_map_file =
+        File::create(format!("/proc/{}/uid_map", child_pid)).expect("Failed to open uid_map");
+
+    uid_map_file
+        .write_all(format!("0 {} 1", host_uid).as_bytes())
         .expect("Failed to write uid_map");
 
     // Write GID map
-    let mut gid_map_file = File::create(format!("/proc/{}/gid_map", child_pid))
-        .expect("Failed to open gid_map");
-    gid_map_file.write_all(format!("0 {} 1", host_gid).as_bytes())
+
+    let mut gid_map_file =
+        File::create(format!("/proc/{}/gid_map", child_pid)).expect("Failed to open gid_map");
+
+    gid_map_file
+        .write_all(format!("0 {} 1", host_gid).as_bytes())
         .expect("Failed to write gid_map");
 
     println!("[Parent] Maps written.");
 
     // Signal the child (by writing to the pipe) that it can proceed
+
     println!("[Parent] Signaling child to continue.");
+
     write(pipe_write_fd, &[1]).expect("[Parent] write to pipe failed");
+
     close(pipe_write_fd).unwrap();
 
-    // Detach from the child process, allowing it to run in the background
-    println!("[Parent] Detaching from child process. Container is running in the background.");
-    println!("[Parent] To stop the container, run: woody stop {}", container_name);
+    if interactive {
+        println!("[Parent] Waiting for interactive container to exit...");
+
+        waitpid(child_pid, None).expect("Parent: waitpid failed");
+
+        println!("[Parent] Interactive container exited.");
+
+        // Unmount overlayfs
+
+        let merged_path = PathBuf::from(format!("./woody-images/{}/merged", container_name));
+
+        println!("[Parent] Unmounting {:?}", merged_path);
+
+        umount2(&merged_path, MntFlags::MNT_DETACH)
+            .context("Failed to unmount overlay FS")
+            .expect("Failed to unmount overlay FS after interactive container exit");
+    } else {
+        // Detached mode
+
+        // Save PID to file
+
+        let pids_dir = PathBuf::from("./woody-pids");
+
+        fs::create_dir_all(&pids_dir).expect("Could not create pids directory");
+
+        let pid_file_path = pids_dir.join(format!("{}.pid", container_name));
+
+        fs::write(pid_file_path, child_pid.to_string()).expect("Could not write PID file");
+
+        println!("[Parent] Detaching from child process. Container is running in the background.");
+
+        println!(
+            "[Parent] To stop the container, run: woody stop {}",
+            container_name
+        );
+    }
 }
 
-fn child_main(pipe_read_fd: i32, pipe_write_fd: i32, container_name: &str, config: &ConfigDetails) -> isize {
+fn child_main(
+    pipe_read_fd: i32,
+    pipe_write_fd: i32,
+    container_name: &str,
+    config: &ConfigDetails,
+) -> isize {
     close(pipe_write_fd).unwrap();
 
     // wait for uid/gid parent set
     wait_for_parent(pipe_read_fd);
+
+    // Set hostname
+    nix::unistd::sethostname("root")
+        .context("Failed to set hostname")
+        .expect("Could not set hostname");
 
     // overlayfs
     configure_fs(container_name).expect("Error configuring fs");
@@ -417,7 +527,8 @@ fn configure_fs(container_name: &str) -> anyhow::Result<()> {
         None::<&str>,
         MsFlags::MS_REC | MsFlags::MS_PRIVATE,
         None::<&str>,
-    ).context("Failed to mount '/' container fs.")?;
+    )
+    .context("Failed to mount '/' container fs.")?;
     println!("[Child] Mounted '/'");
 
     // 5. Attempt overlayfs mount
@@ -433,8 +544,9 @@ fn configure_fs(container_name: &str) -> anyhow::Result<()> {
         &merged,
         Some("overlay"),
         MsFlags::empty(),
-        Some(mount_opts.as_str())
-    ).context("Could not mount overlay fs.")?;
+        Some(mount_opts.as_str()),
+    )
+    .context("Could not mount overlay fs.")?;
     println!("[Child] Created overlayFS.");
 
     std::env::set_current_dir(&merged).context("[Child] Could not change cwd")?;
@@ -456,12 +568,12 @@ fn exec(config: &ConfigDetails) {
 
     // Set working directory
     if !config.working_dir.is_empty() {
-        std::env::set_current_dir(&config.working_dir)
-            .expect("Could not set working directory");
+        std::env::set_current_dir(&config.working_dir).expect("Could not set working directory");
     }
 
     // Prepare environment variables
-    let env_vars: Vec<CString> = config.env
+    let env_vars: Vec<CString> = config
+        .env
         .iter()
         .map(|e| CString::new(e.clone()).unwrap())
         .collect();
