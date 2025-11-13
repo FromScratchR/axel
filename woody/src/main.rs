@@ -3,15 +3,13 @@ mod container;
 use anyhow::Context;
 use clap::Parser;
 use nix::{
-    mount::{mount, umount2, MntFlags, MsFlags},
     sched::{clone, CloneFlags},
     sys::wait::waitpid,
-    unistd::{close, execve, getgid, getuid, pivot_root, read, setgid, setuid, write, Gid, Uid},
+    unistd::{close, getgid, getuid, write}
 };
 use oci_spec::runtime::Spec;
 use std::{
-    ffi::CString,
-    fs::{self, File},
+    fs::{File},
     io::Write,
     path::PathBuf,
 };
@@ -64,7 +62,7 @@ fn spawn_container(_container_name: &str, spec: &Spec) -> anyhow::Result<()> {
     let mut stack = vec![0; STACK_SIZE];
 
     let spec_clone = spec.clone();
-    let child_fn = || child_main(pipe_read_fd, pipe_write_fd, &spec_clone);
+    let child_fn = || container::child_main(pipe_read_fd, pipe_write_fd, &spec_clone);
 
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS

@@ -4,7 +4,7 @@ use anyhow::Context;
 use nix::{mount::{mount, umount2, MntFlags, MsFlags}, unistd::{close, pivot_root, read, setgid, setuid, Gid, Uid, execve}};
 use oci_spec::runtime::Spec;
 
-pub fn child_main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
+pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
     close(pipe_write_fd).unwrap();
     wait_for_parent_setup(pipe_read_fd);
 
