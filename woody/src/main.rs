@@ -62,7 +62,7 @@ fn spawn_container(_container_name: &str, spec: &Spec) -> anyhow::Result<()> {
     let mut stack = vec![0; STACK_SIZE];
 
     let spec_clone = spec.clone();
-    let child_fn = || container::child_main(pipe_read_fd, pipe_write_fd, &spec_clone);
+    let child_fn = || container::main(pipe_read_fd, pipe_write_fd, &spec_clone);
 
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS

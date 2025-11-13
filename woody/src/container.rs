@@ -1,4 +1,4 @@
-use std::{ffi::CString, fs};
+use std::{env, ffi::CString};
 
 use anyhow::Context;
 use nix::{mount::{mount, umount2, MntFlags, MsFlags}, unistd::{close, pivot_root, read, setgid, setuid, Gid, Uid, execve}};
@@ -45,21 +45,17 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     let root = spec.root().as_ref().context("OCI spec has no root")?;
     let rootfs = root.path();
 
+    println!("[Container] Changing CWD to {:?}", &rootfs);
+    env::set_current_dir(&rootfs).context("Failed to cd into new root")?;
+
     // In a proper implementation, we would mount all mounts from spec.mounts()
     // For now, we just pivot_root into the rootfs.
 
-    let old_root_put_dir = "oldroot";
-    
-    // We must chdir into the new root *before* pivot_root
-    nix::unistd::chdir(rootfs)?;
-    fs::create_dir_all(old_root_put_dir)?;
-
-    pivot_root(".", old_root_put_dir).context("Could not pivot root")?;
+    pivot_root(".", ".").context("Could not pivot root")?;
     
     nix::unistd::chdir("/").context("Could not chdir to new root")?;
 
-    umount2(old_root_put_dir, MntFlags::MNT_DETACH).context("Could not unmount old root")?;
-    fs::remove_dir(old_root_put_dir)?;
+    umount2("/", MntFlags::MNT_DETACH).context("Could not unmount old root")?;
 
     Ok(())
 }
