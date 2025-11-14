@@ -1,11 +1,15 @@
 use std::{env, ffi::CString};
 
 use anyhow::Context;
-use nix::{mount::{mount, umount2, MntFlags, MsFlags}, unistd::{close, pivot_root, read, setgid, setuid, Gid, Uid, execve}};
+use nix::{
+    mount::{mount, umount2, MntFlags, MsFlags},
+    unistd::{close, execvp, pivot_root, read, setgid, setuid, Gid, Uid},
+};
 use oci_spec::runtime::Spec;
 
 pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
     close(pipe_write_fd).unwrap();
+
     wait_for_parent_setup(pipe_read_fd);
 
     if let Some(hostname) = spec.hostname() {
@@ -28,6 +32,7 @@ fn wait_for_parent_setup(pipe_read_fd: i32) {
     close(pipe_read_fd).expect("[Child] Could not close pipe");
     println!("[woody-child] Signal received. Maps are written.");
 
+    // TODO set uid/gid handling
     setuid(Uid::from_raw(0)).expect("[Child] setuid(0) failed");
     setgid(Gid::from_raw(0)).expect("[Child] setgid(0) failed");
 }
@@ -42,8 +47,18 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     )
     .context("Failed to make root mount private")?;
 
+    dbg!(spec);
     let root = spec.root().as_ref().context("OCI spec has no root")?;
     let rootfs = root.path();
+
+    mount(
+        Some(rootfs),
+        rootfs,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .context("Failed to bind mount rootfs")?;
 
     println!("[Container] Changing CWD to {:?}", &rootfs);
     env::set_current_dir(&rootfs).context("Failed to cd into new root")?;
@@ -52,7 +67,7 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     // For now, we just pivot_root into the rootfs.
 
     pivot_root(".", ".").context("Could not pivot root")?;
-    
+
     nix::unistd::chdir("/").context("Could not chdir to new root")?;
 
     umount2("/", MntFlags::MNT_DETACH).context("Could not unmount old root")?;
@@ -70,8 +85,21 @@ fn exec_user_process(spec: &Spec) {
     nix::unistd::chdir(cwd).expect("Failed to chdir to process cwd");
 
     let program = CString::new(args[0].clone()).unwrap();
-    let args: Vec<CString> = args.iter().map(|arg| CString::new(arg.clone()).unwrap()).collect();
-    let env: Vec<CString> = env.iter().map(|e| CString::new(e.clone()).unwrap()).collect();
+    let args: Vec<CString> = args
+        .iter()
+        .map(|arg| CString::new(arg.clone()).unwrap())
+        .collect();
+    let env: Vec<CString> = env
+        .iter()
+        .map(|e| CString::new(e.clone()).unwrap())
+        .collect();
 
-    execve(&program, &args, &env).expect("execve failed");
+    for e in &env {
+        let mut parts = e.to_str().unwrap().splitn(2, '=');
+        let key = parts.next().unwrap();
+        let value = parts.next().unwrap_or("");
+        unsafe { std::env::set_var(key, value); }
+    }
+
+    execvp(&program, &args).expect("execve failed");
 }
