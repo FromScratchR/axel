@@ -4,15 +4,10 @@ use anyhow::Context;
 use clap::Parser;
 use nix::{
     sched::{clone, CloneFlags},
-    sys::wait::waitpid,
-    unistd::{close, getgid, getuid, write}
+    unistd::{close, getgid, getuid, write},
 };
 use oci_spec::runtime::Spec;
-use std::{
-    fs::{File},
-    io::Write,
-    path::PathBuf,
-};
+use std::{fs::File, io::Write, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -28,6 +23,8 @@ enum OciCommand {
     Create {
         #[arg(short, long)]
         bundle: PathBuf,
+        #[arg(short, long)]
+        pids_path: PathBuf,
         container_id: String,
     },
 }
@@ -41,18 +38,19 @@ fn main() -> anyhow::Result<()> {
     match opts.command {
         OciCommand::Create {
             bundle,
+            pids_path,
             container_id,
         } => {
             let spec_path = bundle.join("config.json");
             let spec = Spec::load(spec_path).context("Failed to load OCI spec")?;
-            spawn_container(&container_id, &spec)?;
+            spawn_container(&spec, &pids_path, &container_id)?;
         }
-    }
+    };
 
     Ok(())
 }
 
-fn spawn_container(_container_name: &str, spec: &Spec) -> anyhow::Result<()> {
+fn spawn_container(spec: &Spec, pids: &PathBuf, container_id: &String) -> anyhow::Result<i32> {
     let host_uid = getuid();
     let host_gid = getgid();
 
@@ -61,8 +59,7 @@ fn spawn_container(_container_name: &str, spec: &Spec) -> anyhow::Result<()> {
     const STACK_SIZE: usize = 1024 * 1024;
     let mut stack = vec![0; STACK_SIZE];
 
-    let spec_clone = spec.clone();
-    let child_fn = || container::main(pipe_read_fd, pipe_write_fd, &spec_clone);
+    let child_fn = || container::main(pipe_read_fd, pipe_write_fd, spec);
 
     let flags = CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
@@ -78,13 +75,16 @@ fn spawn_container(_container_name: &str, spec: &Spec) -> anyhow::Result<()> {
     )
     .context("clone() failed")?;
 
+    let child_pid_path = pids.join(container_id);
+    std::fs::write(child_pid_path, child_pid.as_raw().to_string()).context("[woody] Could not write container PID")?;
+
     println!("[woody] Cloned child with PID: {}", child_pid);
 
     close(pipe_read_fd)?;
 
     println!("[woody] Writing map files for child {}", child_pid);
-    let mut setgroups_file =
-        File::create(format!("/proc/{}/setgroups", child_pid)).context("Failed to open setgroups")?;
+    let mut setgroups_file = File::create(format!("/proc/{}/setgroups", child_pid))
+        .context("Failed to open setgroups")?;
     setgroups_file
         .write_all(b"deny")
         .context("Failed to write to setgroups")?;
@@ -107,11 +107,8 @@ fn spawn_container(_container_name: &str, spec: &Spec) -> anyhow::Result<()> {
     close(pipe_write_fd)?;
 
     // In this one-shot model, woody waits for the child to exit.
-    // Conmon will be waiting for woody to exit.
-    waitpid(child_pid, None).context("waitpid failed")?;
-    println!("[woody] Container process exited.");
+    // waitpid(child_pid, None).context("waitpid failed")?;
+    println!("[woody] Process exited.");
 
-    Ok(())
+    Ok(0)
 }
-
-
