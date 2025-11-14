@@ -8,5 +8,3 @@ pub fn parse_image_name(image_ref: &str) -> (String, String) {
 
     (image_name.to_owned(), tag.to_owned())
 }
-
-
