@@ -25,6 +25,8 @@ enum Commands {
 
         /// The command to run in the container
         command: Vec<String>,
+        #[arg(short='d', long)]
+        detach: bool
     },
     Stop {
         container_id: String
@@ -37,11 +39,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { image, command } => {
-            run_container(&image, command).await?;
+        Commands::Run { image, command, detach } => {
+            run_container(&image, command, detach).await?;
         }
         Commands::List => {
-            list_containers();
+            list_containers()?;
         }
         Commands::Stop { container_id } => {
             stop_container(container_id)?;
@@ -52,11 +54,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn stop_container(container_id: String) -> anyhow::Result<()> {
+    let container_id = container_id.replace(':', "-");
     let pids = PathBuf::from("./axel-pids");
     let target = pids.join(&container_id);
+    dbg!(&target);
 
     let container_pid = str::parse::<i32>(&fs::read_to_string(&target)?)?;
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(container_pid), nix::sys::signal::SIGTERM)?;
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(container_pid), nix::sys::signal::SIGKILL)?;
 
     fs::remove_file(target)?;
     println!("[axel] {} has stopped", container_id);
@@ -64,13 +68,26 @@ fn stop_container(container_id: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn list_containers() {
-    // This needs to be adapted to how conmon stores state
+fn list_containers() -> anyhow::Result<()> {
+    let pids_path = PathBuf::from("./axel-pids");
 
-    println!("Listing containers is not yet implemented with conmon.");
+    if let Ok(dir) = fs::read_dir(pids_path) {
+        for entry in dir {
+            match entry {
+                Ok(e) => {
+                    println!("{} - PID {}", e.file_name().to_str().unwrap(), fs::read_to_string(e.path())?);
+                }
+                Err(e) => {
+                    panic!("{}", e);
+                }
+            }
+        }
+    };
+
+    Ok(())
 }
 
-async fn run_container(image_ref: &str, command: Vec<String>) -> anyhow::Result<()> {
+async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> anyhow::Result<()> {
     let container_name = image_ref.replace(':', "-");
 
     let image_base_path = PathBuf::from(format!("./axel-images/{}", container_name));
@@ -134,10 +151,6 @@ async fn run_container(image_ref: &str, command: Vec<String>) -> anyhow::Result<
     println!("-> OCI spec saved to {:?}", config_path);
 
     let pids_path = PathBuf::from("./axel-pids");
-    let pid_file = format!("{}.pid", container_name);
-    if pids_path.join(pid_file).exists() {
-        panic!("-> Container {container_name} is already running");
-    }
 
     fs::create_dir_all(&pids_path)?;
 
@@ -148,6 +161,9 @@ async fn run_container(image_ref: &str, command: Vec<String>) -> anyhow::Result<
         .arg("--bundle").arg(bundle_path)
         .arg("--pids-path").arg(pids_path)
         .arg(container_name.clone());
+
+    // -it mode
+    if detach { cmd.arg("--detach"); }
 
     println!("Executing woody command: {:?}", cmd);
 
