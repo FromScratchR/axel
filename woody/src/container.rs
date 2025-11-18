@@ -1,4 +1,4 @@
-use std::{env, ffi::CString};
+use std::{env, ffi::CString, path::Path};
 
 use anyhow::Context;
 use nix::{
@@ -9,7 +9,6 @@ use oci_spec::runtime::Spec;
 
 pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
     close(pipe_write_fd).unwrap();
-
     wait_for_parent_setup(pipe_read_fd);
 
     if let Some(hostname) = spec.hostname() {
@@ -19,7 +18,6 @@ pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
     }
 
     configure_fs(spec).expect("Error configuring fs");
-
     exec_user_process(spec);
 
     0
@@ -47,9 +45,92 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     )
     .context("Failed to make root mount private")?;
 
-    dbg!(spec);
     let root = spec.root().as_ref().context("OCI spec has no root")?;
     let rootfs = root.path();
+
+    for m in spec.mounts().as_ref().unwrap() {
+        let mount_dest = format!("{}/{}", rootfs.to_str().unwrap(), m.destination().to_str().unwrap());
+        let path = Path::new(&mount_dest);
+        dbg!(&path);
+        std::fs::create_dir_all(path)?;
+
+        println!("Mounting {:?} to {:?}", m.source(), m.destination());
+        let mut source = m.source().as_ref().map(|p| p.to_str().unwrap());
+        let mut fstype = m.typ().as_ref().map(|s| s.as_str());
+
+        let mut flags = MsFlags::empty();
+        let mut data_options = Vec::new();
+
+        if let Some(opts) = m.options() {
+            for opt in opts {
+                match opt.as_str() {
+                    // --- Common VFS Flags ---
+                    "defaults" => {}, // 'defaults' implies 0 flags (rw, suid, dev, exec, auto, nouser, async)
+                    "ro" => flags |= MsFlags::MS_RDONLY,
+                    "rw" => {}, // 'rw' is the default (absence of MS_RDONLY), so we do nothing
+                    "suid" => {}, // 'suid' is default (absence of MS_NOSUID)
+                    "nosuid" => flags |= MsFlags::MS_NOSUID,
+                    "dev" => {}, // 'dev' is default
+                    "nodev" => flags |= MsFlags::MS_NODEV,
+                    "exec" => {}, // 'exec' is default
+                    "noexec" => flags |= MsFlags::MS_NOEXEC,
+                    "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
+                    "async" => {}, // default
+                    "dirsync" => flags |= MsFlags::MS_DIRSYNC,
+                    "remount" => flags |= MsFlags::MS_REMOUNT,
+                    "mand" => flags |= MsFlags::MS_MANDLOCK,
+                    "nomand" => {},
+                    "atime" => {}, // default
+                    "noatime" => flags |= MsFlags::MS_NOATIME,
+                    "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+                    "relatime" => flags |= MsFlags::MS_RELATIME,
+                    "norelatime" => {},
+                    "strictatime" => flags |= MsFlags::MS_STRICTATIME,
+                    "gid=5" => data_options.push("gid=0".to_string()),
+
+                    // --- Bind Mounts ---
+                    "bind" => flags |= MsFlags::MS_BIND,
+                    "rbind" => flags |= MsFlags::MS_BIND | MsFlags::MS_REC,
+                    
+                    // --- Anything else is treated as filesystem-specific data ---
+                    // e.g., "mode=755", "size=65k", "lowerdir=..."
+                    other => data_options.push(other.to_string()),
+                }
+            }
+        }
+
+        let data_str = if data_options.is_empty() {
+            None
+        } else {
+            Some(data_options.join(","))
+        };
+        
+        dbg!(&source, &fstype, &flags, &data_str);
+
+        if fstype == Some("sysfs") {
+            println!("> [Fix] Detected sysfs mount without Network Namespace. Switching to BIND mount.");
+            
+            source = Some("/sys"); 
+            fstype = None; 
+            flags |= MsFlags::MS_BIND | MsFlags::MS_REC;
+        }
+
+        else if fstype == Some("cgroup") {
+            println!("> [Fix] Switching cgroup to BIND mount.");
+            // We bind mount the host's cgroup hierarchy
+            source = Some("/sys/fs/cgroup"); 
+            fstype = None; 
+            flags |= MsFlags::MS_BIND | MsFlags::MS_REC;
+        }
+
+        mount(
+            source,
+            &mount_dest[..],
+            fstype,
+            flags,
+            data_str.as_deref(),
+        )?;
+    }
 
     mount(
         Some(rootfs),
@@ -62,9 +143,6 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
 
     println!("[Container] Changing CWD to {:?}", &rootfs);
     env::set_current_dir(&rootfs).context("Failed to cd into new root")?;
-
-    // In a proper implementation, we would mount all mounts from spec.mounts()
-    // For now, we just pivot_root into the rootfs.
 
     pivot_root(".", ".").context("Could not pivot root")?;
 
