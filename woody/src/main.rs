@@ -1,5 +1,6 @@
 mod container;
 mod utils;
+mod io;
 
 use anyhow::Context;
 use clap::Parser;
@@ -16,10 +17,12 @@ use nix::{
 use oci_spec::runtime::{Spec};
 use std::{
     fs::File,
-    io::{self, Write},
+    io::{Write},
     os::unix::io::AsRawFd,
     path::PathBuf,
 };
+
+use crate::io::TerminalGuard;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -42,6 +45,7 @@ enum OciCommand {
         container_id: String,
     },
 }
+
 
 fn main() -> anyhow::Result<()> {
     let opts = Opts::parse();
@@ -72,8 +76,6 @@ fn spawn_container(
     let host_gid = getgid();
 
     let mut flags = CloneFlags::empty();
-
-    dbg!(spec.linux().as_ref().unwrap().namespaces());
 
     if let Some(linux_spec) = spec.linux() {
         if let Some(namespaces) = linux_spec.namespaces() {
@@ -142,6 +144,7 @@ fn spawn_container(
 
         let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
 
+        // Generate session helper fn
         nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
 
         const STACK_SIZE: usize = 1024 * 1024;
@@ -150,10 +153,14 @@ fn spawn_container(
         let spec_clone = spec.clone();
         let child_fn = move || {
             close(master_fd).unwrap();
+
+            // Set new terminal session as detached
             setsid().unwrap();
-            unsafe {
-                tiocsctty(slave_fd, 1).expect("Failed to set controlling TTY");
-            }
+
+            // Set section master
+            unsafe { tiocsctty(slave_fd, 1).expect("Failed to set controlling TTY"); }
+
+            // Set stdin / out / err onto slave_fd
             dup2(slave_fd, 0).unwrap();
             dup2(slave_fd, 1).unwrap();
             dup2(slave_fd, 2).unwrap();
@@ -170,6 +177,7 @@ fn spawn_container(
         )
         .context("clone() failed")?;
 
+        // Remove base fd from process
         close(slave_fd)?;
         close(pipe_read_fd)?;
 
@@ -181,7 +189,6 @@ fn spawn_container(
 
         println!("[woody] Writing map files for child {}", child_pid);
 
-        // TODO set uid/gid OCI maps
         let mut setgroups_file = File::create(format!("/proc/{}/setgroups", child_pid))
             .context("Failed to open setgroups")?;
         setgroups_file
@@ -205,12 +212,21 @@ fn spawn_container(
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
         close(pipe_write_fd)?;
 
-        let term_fd = io::stdin().as_raw_fd();
+        println!("[woody-debug] Entering interactive mode setup");
+        let term_fd = std::io::stdin().as_raw_fd();
         let mut termios = tcgetattr(term_fd).context("tcgetattr failed")?;
-        let original_termios = termios.clone();
 
+        let _term_guard = TerminalGuard {
+            fd: term_fd,
+            old_state: termios.clone(),
+        };
+
+        println!("[woody-debug] Putting terminal in raw mode");
+
+        // Apply custom flags to this process' terminal (prepare for multiplexing)
         termios.local_flags &= !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN | LocalFlags::ISIG);
         tcsetattr(term_fd, SetArg::TCSAFLUSH, &termios).context("tcsetattr failed")?;
+        println!("[woody-debug] Terminal is in raw mode");
 
         let mut fds = [
             PollFd::new(term_fd, PollFlags::POLLIN),
@@ -218,36 +234,42 @@ fn spawn_container(
         ];
 
         loop {
+            // Multiplex by waiting term_fd (stdin of this process) / master_fs (PTY portal)
             poll(&mut fds, -1).context("poll failed")?;
 
+            // Keyboard (stdin)
             if let Some(revents) = fds[0].revents() {
                 if revents.contains(PollFlags::POLLIN) {
                     let mut buf = [0u8; 1024];
                     let n = read(term_fd, &mut buf).context("read from stdin failed")?;
                     if n == 0 {
+                        println!("[woody-debug] stdin read 0 bytes, breaking loop");
                         break;
                     }
                     write(master_fd, &buf[..n]).context("write to master failed")?;
                 }
             }
 
+            // Shell (master_fd)
             if let Some(revents) = fds[1].revents() {
                 if revents.contains(PollFlags::POLLIN) {
                     let mut buf = [0u8; 1024];
                     let n = read(master_fd, &mut buf).context("read from master failed")?;
                     if n == 0 {
+                        println!("[woody-debug] master_fd read 0 bytes, breaking loop");
                         break;
                     }
-                    write(io::stdout().as_raw_fd(), &buf[..n])
+                    write(std::io::stdout().as_raw_fd(), &buf[..n])
                         .context("write to stdout failed")?;
                 }
             }
         }
-
-        tcsetattr(term_fd, SetArg::TCSAFLUSH, &original_termios).context("tcsetattr failed")?;
+        
+        println!("[woody-debug] Poll loop exited");
 
         println!("[woody] Waiting for child process {}", child_pid);
         waitpid(child_pid, None).context("waitpid() failed")?;
+        println!("[woody-debug] waitpid finished");
     }
 
     println!("[woody] Process exited.");
