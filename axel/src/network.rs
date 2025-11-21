@@ -163,7 +163,9 @@ pub async fn download_and_unpack_layers(
     client: &reqwest::Client,
 ) -> anyhow::Result<()> {
     for layer in layers {
+        #[cfg(feature = "dbg")]
         axel!("Downloading layer {}", &layer.digest[..12]);
+
         let layer_url = format!(
             "https://registry-1.docker.io/v2/{}/blobs/{}",
             image_name, layer.digest
@@ -176,7 +178,9 @@ pub async fn download_and_unpack_layers(
             .bytes()
             .await?;
 
+        #[cfg(feature = "dbg")]
         axel!("Unpacking layer {}", &layer.digest[..12]);
+
         let tar = flate2::read::GzDecoder::new(&response_bytes[..]);
         let mut archive = tar::Archive::new(tar);
         archive.unpack(rootfs_path)?;
