@@ -9,3 +9,6 @@ anyhow = "1.0"
 oci-spec = "0.6"
 clap = { version = "4.0", features = ["derive"] }
 caps = "0.5"
+
+[features]
+dbg = []

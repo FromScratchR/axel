@@ -1,6 +1,9 @@
 mod container;
 mod utils;
 mod io;
+mod macros;
+mod devices;
+mod ugid;
 
 use anyhow::Context;
 use clap::Parser;
@@ -23,7 +26,9 @@ use std::{
     path::PathBuf,
 };
 
-use crate::io::TerminalGuard;
+use crate::{io::TerminalGuard};
+#[allow(unused)]
+use crate::macros::{woody, woody_err};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -67,6 +72,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+
 fn spawn_container(
     spec: &Spec,
     pids: &PathBuf,
@@ -86,6 +92,7 @@ fn spawn_container(
         }
     };
 
+    #[cfg(feature = "dbg")]
     println!("[woody] using {:?} flags", flags);
 
     if detach {
@@ -107,39 +114,26 @@ fn spawn_container(
 
         let child_pid_path = pids.join(container_id);
         std::fs::write(child_pid_path, child_pid.as_raw().to_string())
-            .context("[woody] Could not write container PID")?;
+            .context("Could not write container PID")?;
 
-        println!("[woody] Cloned child with PID: {}", child_pid);
+        #[cfg(feature = "dbg")]
+        woody!("Cloned child with PID: {}", child_pid);
 
         close(pipe_read_fd)?;
 
-        println!("[woody] Writing map files for child {}", child_pid);
-        let mut setgroups_file = File::create(format!("/proc/{}/setgroups", child_pid))
-            .context("Failed to open setgroups")?;
-        setgroups_file
-            .write_all(b"deny")
-            .context("Failed to write to setgroups")?;
+        ugid::map_ugid(child_pid, host_uid, host_gid)?;
 
-        let mut uid_map_file =
-            File::create(format!("/proc/{}/uid_map", child_pid)).context("Failed to open uid_map")?;
-        uid_map_file
-            .write_all(format!("0 {} 1", host_uid).as_bytes())
-            .context("Failed to write uid_map")?;
+        devices::apply_device_rules(spec, child_pid, container_id)?;
 
-        let mut gid_map_file =
-            File::create(format!("/proc/{}/gid_map", child_pid)).context("Failed to open gid_map")?;
-        gid_map_file
-            .write_all(format!("0 {} 1", host_gid).as_bytes())
-            .context("Failed to write gid_map")?;
+        #[cfg(feature = "dbg")] {
+            woody!("Maps written.");
+            woody!("Signaling child to continue.");
+        }
 
-        apply_device_rules(spec, child_pid, container_id)?;
-
-        println!("[woody] Maps written.");
-        println!("[woody] Signaling child to continue.");
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
         close(pipe_write_fd)?;
 
-        println!("[woody] Process exited.");
+        woody!("Process exited.");
     } else {
         let pty = openpty(None, None).context("openpty failed")?;
         let master_fd = pty.master;
@@ -186,34 +180,22 @@ fn spawn_container(
 
         let child_pid_path = pids.join(container_id);
         std::fs::write(child_pid_path, child_pid.as_raw().to_string())
-            .context("[woody] Could not write container PID")?;
+            .context("Could not write container PID")?;
 
-        println!("[woody] Cloned child with PID: {}", child_pid);
+        #[cfg(feature = "dbg")] {
+            woody!("Cloned child with PID: {}", child_pid);
+            woody!("Writing map files for child {}", child_pid);
+        }
 
-        println!("[woody] Writing map files for child {}", child_pid);
+        ugid::map_ugid(child_pid, host_uid, host_gid)?;
 
-        let mut setgroups_file = File::create(format!("/proc/{}/setgroups", child_pid))
-            .context("Failed to open setgroups")?;
-        setgroups_file
-            .write_all(b"deny")
-            .context("Failed to write to setgroups")?;
+        devices::apply_device_rules(spec, child_pid, container_id)?;
 
-        let mut uid_map_file =
-            File::create(format!("/proc/{}/uid_map", child_pid)).context("Failed to open uid_map")?;
-        uid_map_file
-            .write_all(format!("0 {} 1", host_uid).as_bytes())
-            .context("Failed to write uid_map")?;
+        #[cfg(feature = "dbg")] {
+            woody!("[woody] Maps written.");
+            woody!("[woody] Signaling child to continue.");
+        }
 
-        let mut gid_map_file =
-            File::create(format!("/proc/{}/gid_map", child_pid)).context("Failed to open gid_map")?;
-        gid_map_file
-            .write_all(format!("0 {} 1", host_gid).as_bytes())
-            .context("Failed to write gid_map")?;
-
-        apply_device_rules(spec, child_pid, container_id)?;
-
-        println!("[woody] Maps written.");
-        println!("[woody] Signaling child to continue.");
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
         close(pipe_write_fd)?;
 
@@ -226,12 +208,15 @@ fn spawn_container(
             old_state: termios.clone(),
         };
 
-        println!("[woody-debug] Putting terminal in raw mode");
+        #[cfg(feature = "dbg")]
+        woody!("Putting terminal in raw mode");
 
         // Apply custom flags to this process' terminal (prepare for multiplexing)
         termios.local_flags &= !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN | LocalFlags::ISIG);
         tcsetattr(term_fd, SetArg::TCSAFLUSH, &termios).context("tcsetattr failed")?;
-        println!("[woody-debug] Terminal is in raw mode");
+
+        #[cfg(feature = "dbg")]
+        woody!("[woody-debug] Terminal is in raw mode");
 
         let mut fds = [
             PollFd::new(term_fd, PollFlags::POLLIN),
@@ -248,9 +233,12 @@ fn spawn_container(
                     let mut buf = [0u8; 1024];
                     let n = read(term_fd, &mut buf).context("read from stdin failed")?;
                     if n == 0 {
-                        println!("[woody-debug] stdin read 0 bytes, breaking loop");
+                        #[cfg(feature= "dbg")]
+                        woody!("stdin read 0 bytes, breaking loop");
+
                         break;
                     }
+
                     write(master_fd, &buf[..n]).context("write to master failed")?;
                 }
             }
@@ -261,7 +249,8 @@ fn spawn_container(
                     let mut buf = [0u8; 1024];
                     let n = read(master_fd, &mut buf).context("read from master failed")?;
                     if n == 0 {
-                        println!("[woody-debug] master_fd read 0 bytes, breaking loop");
+                        #[cfg(feature= "dbg")]
+                        woody!("[woody-debug] master_fd read 0 bytes, breaking loop");
                         break;
                     }
                     write(std::io::stdout().as_raw_fd(), &buf[..n])
@@ -270,57 +259,18 @@ fn spawn_container(
             }
         }
         
-        println!("[woody-debug] Poll loop exited");
+        #[cfg(feature = "dbg")] {
+            woody!("Poll loop exited");
+            woody!("Waiting for child process {}", child_pid);
+        }
 
-        println!("[woody] Waiting for child process {}", child_pid);
         waitpid(child_pid, None).context("waitpid() failed")?;
-        println!("[woody-debug] waitpid finished");
+
+        #[cfg(feature = "dbg")]
+        woody!("[woody-debug] waitpid finished");
     }
 
-    println!("[woody] Process exited.");
+    woody!("Process exited.");
 
     Ok(0)
-}
-
-fn apply_device_rules(spec: &Spec, child_pid: Pid, container_id: &String) -> anyhow::Result<()> {
-    let devices = match spec.linux().as_ref().and_then(|l| l.resources().as_ref().and_then(|r| r.devices().as_ref())) {
-        Some(d) if !d.is_empty() => d,
-        _ => return Ok(()), // No device rules to apply
-    };
-
-    println!("[woody] Applying device rules for container {}", container_id);
-
-    // 1. Create cgroup directory for the container
-    let cgroup_path = PathBuf::from("/sys/fs/cgroup/devices/woody").join(container_id);
-    fs::create_dir_all(&cgroup_path)?;
-
-    // 2. Deny all devices by default, as per OCI spec
-    fs::write(cgroup_path.join("devices.deny"), "a *:* rwm")?;
-
-    // 3. Add child PID to the cgroup
-    fs::write(cgroup_path.join("cgroup.procs"), child_pid.to_string())?;
-
-    // 4. Apply the specific allow/deny rules from the spec
-    for device_rule in devices {
-        let major = device_rule.major().map(|v| v.to_string()).unwrap_or_else(|| "*".to_string());
-        let minor = device_rule.minor().map(|v| v.to_string()).unwrap_or_else(|| "*".to_string());
-
-        let rule_string = format!(
-            "{} {}:{} {}",
-            device_rule.typ().map(|t| t.as_str().to_string()).unwrap_or_else(|| "a".to_string()),
-            major,
-            minor,
-            device_rule.access().as_ref().map(|a| a.as_str()).unwrap_or("")
-        );
-
-        let target_file = if device_rule.allow() {
-            "devices.allow"
-        } else {
-            "devices.deny"
-        };
-
-        fs::write(cgroup_path.join(target_file), rule_string)?;
-    }
-
-    Ok(())
 }
