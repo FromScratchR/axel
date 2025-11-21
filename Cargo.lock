@@ -150,6 +150,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
+name = "caps"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd1ddba47aba30b6a889298ad0109c3b8dcb0e8fc993b459daa7067d46f865e0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1915,16 +1924,10 @@ name = "woody"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "caps",
  "clap",
- "flate2",
- "libc",
  "nix",
  "oci-spec",
- "reqwest",
- "serde",
- "serde_json",
- "tar",
- "tokio",
 ]
 
 [[package]]
