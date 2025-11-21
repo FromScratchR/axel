@@ -1,11 +1,12 @@
-use std::{env, ffi::CString, path::Path};
+use std::{env, ffi::CString, path::Path, str::FromStr};
 
 use anyhow::Context;
+use caps::{CapSet, CapsHashSet};
 use nix::{
     mount::{mount, umount2, MntFlags, MsFlags},
     unistd::{close, execvp, pivot_root, read, setgid, setuid, Gid, Uid},
 };
-use oci_spec::runtime::Spec;
+use oci_spec::runtime::{LinuxCapabilities, Spec};
 
 pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
     close(pipe_write_fd).unwrap();
@@ -226,6 +227,70 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
             }
         }
     }
+
+    set_caps(spec.process().as_ref().unwrap().capabilities())?;
+
+    Ok(())
+}
+
+fn set_caps(caps: &Option<LinuxCapabilities>) -> anyhow::Result<()> {
+    dbg!(&caps);
+
+    if let Some(capabilities) = caps {
+        // OCI caps to caps::Caps ("CAP_SYS_ADMIN" to caps::Capability enum)
+        let to_set = |names: &Option<oci_spec::runtime::Capabilities>| -> anyhow::Result<CapsHashSet> {
+            let mut set = CapsHashSet::new();
+
+            if let Some(names) = names {
+                for cap in names {
+                    let s = cap.to_string().to_uppercase(); 
+
+                    // Check for "CAP_" prefix and add it if missing
+                    let cap_string = if s.starts_with("CAP_") {
+                        s
+                    } else {
+                        format!("CAP_{}", s)
+                    };
+
+                    dbg!(&cap_string);
+
+                    // OCI names are "CAP_SYS_ADMIN", caps crate expects "SYS_ADMIN"
+                    let cap = caps::Capability::from_str(&cap_string)
+                        .map_err(|_| anyhow::anyhow!("Invalid capability: {}", cap.to_string()))?;
+                    set.insert(cap);
+                }
+            }
+
+            Ok(set)
+        };
+
+        // Parse all sets from spec
+        let effective = to_set(capabilities.effective())?;
+        let permitted = to_set(capabilities.permitted())?;
+        let inheritable = to_set(capabilities.inheritable())?;
+        let bounding = to_set(capabilities.bounding())?;
+        let ambient = to_set(capabilities.ambient())?;
+
+        // Clear actual caps
+        caps::clear(None, CapSet::Effective).ok();
+
+        caps::set(None, CapSet::Inheritable, &inheritable).context("Failed to set Inheritable caps")?;
+        caps::set(None, CapSet::Permitted, &permitted).context("Failed to set Permitted caps")?;
+
+        for cap in ambient {
+            caps::raise(None, CapSet::Ambient, cap).context("Failed to raise Ambient cap")?;
+        }
+
+        caps::set(None, CapSet::Effective, &effective).context("Failed to set Effective caps")?;
+        let all_caps = caps::all(); // Get all supported kernel caps
+        for cap in all_caps {
+            if !bounding.contains(&cap) {
+                // If the spec didn't ask for it, drop it from bounding.
+                // Ignore errors here (some caps might not be droppable or supported)
+                let _ = caps::drop(None, CapSet::Bounding, cap); 
+            }
+        }
+    };
 
     Ok(())
 }
