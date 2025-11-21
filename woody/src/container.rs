@@ -51,7 +51,6 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     for m in spec.mounts().as_ref().unwrap() {
         let mount_dest = format!("{}/{}", rootfs.to_str().unwrap(), m.destination().to_str().unwrap());
         let path = Path::new(&mount_dest);
-        dbg!(&path);
         std::fs::create_dir_all(path)?;
 
         println!("Mounting {:?} to {:?}", m.source(), m.destination());
@@ -149,6 +148,38 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     nix::unistd::chdir("/").context("Could not chdir to new root")?;
 
     umount2("/", MntFlags::MNT_DETACH).context("Could not unmount old root")?;
+
+    if let Some(linux) = spec.linux() {
+        if let Some(ro_paths) = linux.readonly_paths() {
+            for path_str in ro_paths {
+                let ro_path = Path::new(path_str);
+                if !ro_path.exists() {
+                    println!("[Container] read-only path {} does not exist, creating.", path_str);
+                    std::fs::create_dir_all(ro_path).context("Could not create read-only path")?;
+                }
+
+                println!("[Container] Making path {} read-only", path_str);
+
+                mount(
+                    Some(path_str.as_str()),
+                    path_str.as_str(),
+                    None::<&str>,
+                    MsFlags::MS_BIND,
+                    None::<&str>,
+                )
+                .with_context(|| format!("Failed to bind mount read-only path {}", path_str))?;
+
+                mount(
+                    Some(path_str.as_str()),
+                    path_str.as_str(),
+                    None::<&str>,
+                    MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                    None::<&str>,
+                )
+                .with_context(|| format!("Failed to remount read-only path {}", path_str))?;
+            }
+        }
+    }
 
     Ok(())
 }
