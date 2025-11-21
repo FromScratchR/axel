@@ -1,6 +1,9 @@
 mod network;
 mod oci;
 mod utils;
+mod macros;
+
+use crate::macros::{axel, axel_err};
 
 use clap::Parser;
 use std::{
@@ -25,13 +28,18 @@ enum Commands {
 
         /// The command to run in the container
         command: Vec<String>,
+
         #[arg(short='d', long)]
         detach: bool
     },
+    Hook {
+
+    },
+    List,
     Stop {
         container_id: String
     },
-    List,
+    Destroy {},
 }
 
 #[tokio::main]
@@ -42,28 +50,32 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run { image, command, detach } => {
             run_container(&image, command, detach).await?;
         }
+        Commands::Hook {} => todo!(),
         Commands::List => {
             list_containers()?;
         }
         Commands::Stop { container_id } => {
             stop_container(container_id)?;
         }
+        Commands::Destroy {} => todo!(),
     }
 
     Ok(())
 }
 
 fn stop_container(container_id: String) -> anyhow::Result<()> {
-    let container_id = container_id.replace(':', "-");
+    let container_id = utils::normalize_container_id(container_id);
+
     let pids = PathBuf::from("./axel-pids");
     let target = pids.join(&container_id);
+    #[cfg(feature = "dbg")]
     dbg!(&target);
 
     let container_pid = str::parse::<i32>(&fs::read_to_string(&target)?)?;
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(container_pid), nix::sys::signal::SIGKILL)?;
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(container_pid), nix::sys::signal::SIGTERM)?;
 
     fs::remove_file(target)?;
-    println!("[axel] {} has stopped", container_id);
+    axel!("{} has stopped", container_id);
 
     Ok(())
 }
@@ -75,10 +87,11 @@ fn list_containers() -> anyhow::Result<()> {
         for entry in dir {
             match entry {
                 Ok(e) => {
-                    println!("{} - PID {}", e.file_name().to_str().unwrap(), fs::read_to_string(e.path())?);
+                    let pid = fs::read_to_string(e.path()).unwrap();
+                    axel!("{} - PID {}", e.file_name().to_str().unwrap(), pid);
                 }
                 Err(e) => {
-                    panic!("{}", e);
+                    axel_err!("{}", e);
                 }
             }
         }
@@ -88,31 +101,31 @@ fn list_containers() -> anyhow::Result<()> {
 }
 
 async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> anyhow::Result<()> {
-    let container_name = image_ref.replace(':', "-");
+    let container_name = utils::normalize_container_id(image_ref);
 
     let image_base_path = PathBuf::from(format!("./axel-images/{}", container_name));
-
     let rootfs_path = image_base_path.join("rootfs");
-
     let image_config: network::ConfigDetails;
 
     if rootfs_path.exists() && fs::read_dir(&rootfs_path)?.next().is_some() {
-        println!("-> Using cached image: {}", image_ref);
+        axel!("Using cached image: {}", image_ref);
 
         let config_path = image_base_path.join("config.json");
         let config_json = fs::read_to_string(config_path)?;
+
         image_config = serde_json::from_str(&config_json)?;
     } else {
-        println!("-> Pulling image: {}", image_ref);
+        axel!("Pulling image: {}", image_ref);
 
+        // idempotency :0
         if image_base_path.exists() {
             fs::remove_dir_all(&image_base_path)?;
         }
-
         fs::create_dir_all(&image_base_path)?;
 
         let (image_name, tag) = utils::parse_image_name(image_ref);
 
+        // Get Docker specific token (only supported register)
         let client = reqwest::Client::new();
         let token = network::authorize(&client, &image_name).await?;
         let (manifest, fetched_config) =
@@ -122,10 +135,12 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
         let config_path = image_base_path.join("config.json");
         let config_json = serde_json::to_string(&image_config)?;
 
+        // Save physical config file on container's folder
         fs::write(config_path, config_json)?;
         fs::create_dir_all(&rootfs_path)?;
 
-        println!("-> Assembling rootfs at: {}", rootfs_path.to_str().unwrap());
+        #[cfg(feature = "dbg")]
+        axel!("Assembling rootfs at: {}", rootfs_path.to_str().unwrap());
 
         network::download_and_unpack_layers(
             &image_name,
@@ -133,28 +148,29 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
             &manifest.layers,
             rootfs_path.to_str().unwrap(),
             &client,
-        )
-        .await?;
+        ).await?;
     }
 
-    println!("-> Generating OCI spec...");
+    axel!("Generating OCI spec...");
 
-    // TODO check if exists
     let spec = oci::generate_oci_config(&image_config, &container_name, command)?;
 
-    // Create bundle directory / save config.json spec
+    // Create bundle directory / Save config.json spec file
     let bundle_path = PathBuf::from(format!("./axel-bundles/{}", container_name));
     fs::create_dir_all(&bundle_path)?;
     let config_path = bundle_path.join("config.json");
     spec.save(&config_path)?;
 
-    println!("-> OCI spec saved to {:?}", config_path);
+    axel!("OCI spec saved to {:?}", config_path);
 
+    // Create PID folder if doesnt exist
     let pids_path = PathBuf::from("./axel-pids");
-
     fs::create_dir_all(&pids_path)?;
 
-    println!("-> Calling woody...");
+    #[cfg(feature = "dbg")]
+    axel!("Calling woody...");
+
+    // Assume woody was compiled to the same folder
     let bin_path = std::env::current_exe()?.parent().unwrap().join("woody");
     let mut cmd = Command::new(bin_path);
     cmd.arg("create")
@@ -165,14 +181,13 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
     // -it mode
     if detach { cmd.arg("--detach"); }
 
-    println!("Executing woody command: {:?}", cmd);
+    axel!("Executing woody command: {:?}", cmd);
 
     let status = cmd.status()?;
     if status.success() {
-        println!("Container '{}' started successfully via woody.", container_name);
+        axel!("Container '{}' started successfully via woody.", container_name);
     } else {
-        eprintln!("Failed to start container via woody.");
-        eprintln!("Woody exit status: {:?}", status);
+        axel_err!("Woody exit status: {:?}", status);
     }
 
     Ok(())

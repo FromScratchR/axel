@@ -1,6 +1,8 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::macros::axel;
+
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum GenericManifest {
@@ -72,6 +74,9 @@ pub async fn authorize(client: &reqwest::Client, image_name: &str) -> anyhow::Re
         .await?
         .token;
 
+    #[cfg(feature = "dbg")]
+    axel!("Acquired Token; Authorized.");
+
     Ok(token)
 }
 
@@ -101,16 +106,20 @@ pub async fn fetch_image_manifest(
 
     let final_manifest: Manifest = match generic_manifest {
         GenericManifest::ImageManifest(manifest) => {
-            println!("-> Found single-architecture manifest.");
+            #[cfg(feature = "dbg")]
+            axel!("Found single-architecture manifest.");
             manifest
         }
         GenericManifest::ManifestList(list) => {
-            println!("-> Found manifest list. Searching for linux/amd64.");
+            #[cfg(feature = "dbg")]
+            axel!("Found manifest list. Searching for linux/amd64.");
+
             let amd64_manifest = list
                 .manifests
                 .iter()
                 .find(|m| m.platform.os == "linux" && m.platform.architecture == "amd64")
                 .context("Could not find linux/amd64 manifest in the list")?;
+
             let manifest_url = format!(
                 "https://registry-1.docker.io/v2/{}/manifests/{}",
                 image_name, amd64_manifest.digest
@@ -134,6 +143,7 @@ pub async fn fetch_image_manifest(
         "https://registry-1.docker.io/v2/{}/blobs/{}",
         image_name, final_manifest.config.digest
     );
+
     let config: ImageConfig = client
         .get(&config_url)
         .bearer_auth(token)
@@ -153,7 +163,7 @@ pub async fn download_and_unpack_layers(
     client: &reqwest::Client,
 ) -> anyhow::Result<()> {
     for layer in layers {
-        println!("[Axel] Downloading layer {}", &layer.digest[..12]);
+        axel!("Downloading layer {}", &layer.digest[..12]);
         let layer_url = format!(
             "https://registry-1.docker.io/v2/{}/blobs/{}",
             image_name, layer.digest
@@ -166,7 +176,7 @@ pub async fn download_and_unpack_layers(
             .bytes()
             .await?;
 
-        println!("[Axel] Unpacking layer {}", &layer.digest[..12]);
+        axel!("Unpacking layer {}", &layer.digest[..12]);
         let tar = flate2::read::GzDecoder::new(&response_bytes[..]);
         let mut archive = tar::Archive::new(tar);
         archive.unpack(rootfs_path)?;
