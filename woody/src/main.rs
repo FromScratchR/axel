@@ -12,10 +12,11 @@ use nix::{
         termios::{tcgetattr, tcsetattr, LocalFlags, SetArg},
         wait::waitpid,
     },
-    unistd::{close, dup2, getgid, getuid, read, setsid, write},
+    unistd::{close, dup2, getgid, getuid, read, setsid, write, Pid},
 };
 use oci_spec::runtime::{Spec};
 use std::{
+    fs,
     fs::File,
     io::{Write},
     os::unix::io::AsRawFd,
@@ -131,6 +132,8 @@ fn spawn_container(
             .write_all(format!("0 {} 1", host_gid).as_bytes())
             .context("Failed to write gid_map")?;
 
+        apply_device_rules(spec, child_pid, container_id)?;
+
         println!("[woody] Maps written.");
         println!("[woody] Signaling child to continue.");
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
@@ -207,6 +210,8 @@ fn spawn_container(
             .write_all(format!("0 {} 1", host_gid).as_bytes())
             .context("Failed to write gid_map")?;
 
+        apply_device_rules(spec, child_pid, container_id)?;
+
         println!("[woody] Maps written.");
         println!("[woody] Signaling child to continue.");
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
@@ -275,4 +280,47 @@ fn spawn_container(
     println!("[woody] Process exited.");
 
     Ok(0)
+}
+
+fn apply_device_rules(spec: &Spec, child_pid: Pid, container_id: &String) -> anyhow::Result<()> {
+    let devices = match spec.linux().as_ref().and_then(|l| l.resources().as_ref().and_then(|r| r.devices().as_ref())) {
+        Some(d) if !d.is_empty() => d,
+        _ => return Ok(()), // No device rules to apply
+    };
+
+    println!("[woody] Applying device rules for container {}", container_id);
+
+    // 1. Create cgroup directory for the container
+    let cgroup_path = PathBuf::from("/sys/fs/cgroup/devices/woody").join(container_id);
+    fs::create_dir_all(&cgroup_path)?;
+
+    // 2. Deny all devices by default, as per OCI spec
+    fs::write(cgroup_path.join("devices.deny"), "a *:* rwm")?;
+
+    // 3. Add child PID to the cgroup
+    fs::write(cgroup_path.join("cgroup.procs"), child_pid.to_string())?;
+
+    // 4. Apply the specific allow/deny rules from the spec
+    for device_rule in devices {
+        let major = device_rule.major().map(|v| v.to_string()).unwrap_or_else(|| "*".to_string());
+        let minor = device_rule.minor().map(|v| v.to_string()).unwrap_or_else(|| "*".to_string());
+
+        let rule_string = format!(
+            "{} {}:{} {}",
+            device_rule.typ().map(|t| t.as_str().to_string()).unwrap_or_else(|| "a".to_string()),
+            major,
+            minor,
+            device_rule.access().as_ref().map(|a| a.as_str()).unwrap_or("")
+        );
+
+        let target_file = if device_rule.allow() {
+            "devices.allow"
+        } else {
+            "devices.deny"
+        };
+
+        fs::write(cgroup_path.join(target_file), rule_string)?;
+    }
+
+    Ok(())
 }
