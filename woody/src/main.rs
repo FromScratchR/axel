@@ -15,13 +15,10 @@ use nix::{
         termios::{tcgetattr, tcsetattr, LocalFlags, SetArg},
         wait::waitpid,
     },
-    unistd::{close, dup2, getgid, getuid, read, setsid, write, Pid},
+    unistd::{close, dup2, getgid, getuid, read, setsid, write},
 };
 use oci_spec::runtime::{Spec};
 use std::{
-    fs,
-    fs::File,
-    io::{Write},
     os::unix::io::AsRawFd,
     path::PathBuf,
 };
