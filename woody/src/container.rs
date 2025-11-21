@@ -243,7 +243,7 @@ fn set_caps(caps: &Option<LinuxCapabilities>) -> anyhow::Result<()> {
 
             if let Some(names) = names {
                 for cap in names {
-                    let s = cap.to_string().to_uppercase(); 
+                    let s = cap.to_string().to_uppercase();
 
                     // Check for "CAP_" prefix and add it if missing
                     let cap_string = if s.starts_with("CAP_") {
