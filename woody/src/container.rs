@@ -154,10 +154,9 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
             for path_str in ro_paths {
                 let ro_path = Path::new(path_str);
                 if !ro_path.exists() {
-                    println!("[Container] read-only path {} does not exist, creating.", path_str);
-                    std::fs::create_dir_all(ro_path).context("Could not create read-only path")?;
+                    println!("[Container] read-only path {} does not exist, skipping.", path_str);
+                    continue;
                 }
-
                 println!("[Container] Making path {} read-only", path_str);
 
                 mount(
@@ -167,7 +166,7 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
                     MsFlags::MS_BIND,
                     None::<&str>,
                 )
-                .with_context(|| format!("Failed to bind mount read-only path {}", path_str))?;
+                .context(format!("Failed to bind mount read-only path {}", path_str))?;
 
                 mount(
                     Some(path_str.as_str()),
@@ -176,7 +175,54 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
                     MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
                     None::<&str>,
                 )
-                .with_context(|| format!("Failed to remount read-only path {}", path_str))?;
+                .context(format!("Failed to remount read-only path {}", path_str))?;
+            }
+        }
+
+        if let Some(masked_paths) = linux.masked_paths() {
+            for path_str in masked_paths {
+                let masked_path = Path::new(path_str);
+                if !masked_path.exists() {
+                    println!("[Container] masked path {} does not exist, skipping.", path_str);
+                    continue;
+                }
+                println!("[Container] Masking path {}", path_str);
+
+                let metadata = match std::fs::symlink_metadata(masked_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        println!("[woody] Warning: could not get metadata for {}: {}", path_str, e);
+                        continue;
+                    }
+                };
+
+                println!("[Container] Masking path: {}", path_str);
+
+                if metadata.is_dir() {
+                    // CASE A: It is a Directory
+                    // We cannot put /dev/null here. We mount a read-only tmpfs to make it empty.
+                    mount(
+                        Some("tmpfs"),
+                        path_str.as_str(),
+                        Some("tmpfs"),
+                        MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                        Some("size=0,mode=755"), // size=0 ensures it stays empty
+                    )
+                    .context(format!("Failed to mask directory {}", path_str))?;
+
+                } else {
+                    // CASE B: It is a File (or device/socket)
+                    // We bind mount /dev/null over it.
+                    // Note: This relies on /dev/null being set up correctly in previous steps!
+                    mount(
+                        Some("/dev/null"),
+                        path_str.as_str(),
+                        None::<&str>,
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    )
+                    .context(format!("Failed to mask file {}", path_str))?;
+                }
             }
         }
     }
