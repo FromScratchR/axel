@@ -3,6 +3,7 @@ mod oci;
 mod utils;
 mod macros;
 
+#[allow(unused)]
 use crate::macros::{axel, axel_err};
 
 use clap::Parser;
