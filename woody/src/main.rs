@@ -204,7 +204,6 @@ fn spawn_container(
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
         close(pipe_write_fd)?;
 
-        println!("[woody-debug] Entering interactive mode setup");
         let term_fd = std::io::stdin().as_raw_fd();
         let mut termios = tcgetattr(term_fd).context("tcgetattr failed")?;
 
@@ -255,7 +254,7 @@ fn spawn_container(
                     let n = read(master_fd, &mut buf).context("read from master failed")?;
                     if n == 0 {
                         #[cfg(feature= "dbg")]
-                        woody!("[woody-debug] master_fd read 0 bytes, breaking loop");
+                        woody!("master_fd read 0 bytes, breaking loop");
                         break;
                     }
                     write(std::io::stdout().as_raw_fd(), &buf[..n])
@@ -272,7 +271,7 @@ fn spawn_container(
         waitpid(child_pid, None).context("waitpid() failed")?;
 
         #[cfg(feature = "dbg")]
-        woody!("[woody-debug] waitpid finished");
+        woody!("waitpid finished");
     }
 
     woody!("Process exited.");
