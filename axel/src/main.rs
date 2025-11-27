@@ -173,11 +173,35 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
 
     // Assume woody was compiled to the same folder
     let bin_path = std::env::current_exe()?.parent().unwrap().join("woody");
-    let mut cmd = Command::new(bin_path);
-    cmd.arg("create")
-        .arg("--bundle").arg(bundle_path)
-        .arg("--pids-path").arg(pids_path)
-        .arg(container_name.clone());
+
+    // Check for systemd-run to enable cgroup delegation
+    let has_systemd = std::process::Command::new("which")
+        .arg("systemd-run")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let mut cmd;
+    if has_systemd {
+        axel!("Detected systemd-run. Wrapping woody to enable Cgroup delegation.");
+        cmd = Command::new("systemd-run");
+        cmd.arg("--user")
+            .arg("--scope")
+            .arg("--property=Delegate=yes")
+            .arg("--quiet")
+            .arg(bin_path) // executable
+            .arg("create") // woody args start here
+            .arg("--bundle").arg(bundle_path)
+            .arg("--pids-path").arg(pids_path)
+            .arg(container_name.clone());
+    } else {
+        axel!("systemd-run not found. Cgroups might fail if not in a delegated scope.");
+        cmd = Command::new(bin_path);
+        cmd.arg("create")
+            .arg("--bundle").arg(bundle_path)
+            .arg("--pids-path").arg(pids_path)
+            .arg(container_name.clone());
+    }
 
     // -it mode
     if detach { cmd.arg("--detach"); }
