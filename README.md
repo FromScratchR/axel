@@ -25,7 +25,7 @@ Unlike Podman it doesn't depends as a daemon like conmon or dockerd like Docker,
 ## Roadmap
 
 - [x] Rootless API architecture
-- [x] Stop/run/list/delete containers
+- [x] Run/list/stop/delete containers
 - [ ] YAML batch config/action support
 - [x] Custom PTY Handling
 - [x] Interactive shell mode (-it) / Detach mode (-d)
