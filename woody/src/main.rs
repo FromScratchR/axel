@@ -4,6 +4,7 @@ mod io;
 mod macros;
 mod devices;
 mod ugid;
+mod cgroups;
 mod network;
 
 use anyhow::Context;
@@ -50,7 +51,6 @@ enum OciCommand {
     },
 }
 
-
 fn main() -> anyhow::Result<()> {
     let opts = Opts::parse();
 
@@ -69,7 +69,6 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 fn spawn_container(
     spec: &Spec,
@@ -122,6 +121,10 @@ fn spawn_container(
         ugid::map_ugid(child_pid, spec.linux().as_ref(), host_uid, host_gid)?;
 
         devices::apply_device_rules(spec, child_pid, container_id)?;
+
+        if let Some(linux) = spec.linux() {
+            cgroups::apply(linux, child_pid).context("Failed to apply cgroups")?;
+        }
 
         #[cfg(feature = "dbg-sgn")] {
             woody!("Maps written.");
@@ -188,6 +191,10 @@ fn spawn_container(
         ugid::map_ugid(child_pid, spec.linux().as_ref(), host_uid, host_gid)?;
 
         devices::apply_device_rules(spec, child_pid, container_id)?;
+
+        if let Some(linux) = spec.linux() {
+            cgroups::apply(linux, child_pid).context("Failed to apply cgroups")?;
+        }
 
         #[cfg(feature = "dbg")] {
             woody!("[woody] Maps written.");
