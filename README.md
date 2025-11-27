@@ -24,41 +24,30 @@ Unlike Podman it doesn't depends as a daemon like conmon or dockerd like Docker,
 
 ## Roadmap
 
-[x] Rootless API architecture
-
-[x] Stop/run/list/delete containers
-
-[ ] YAML batch config/action support
-
-[x] Custom PTY Handling
-
-[x] Interactive shell mode (-it) / Detach mode (-d)
-
-[ ] Gracefull PTY shutdown
-
-[x] Docker registry complete compatibility
-
-[ ] General registries compatibility
-
-[ ] OCI-Compliant support
-    [x] - Hostname
-    [ ] - Resources
-    [x] - Process (user, args, env, cwd)
-    [x] - Cgroups
-    [~] - Capabilities
-    [x] - Namespaces
-    [x] - Masked Paths
-    [x] - Read-Only Paths
-    [x] - Mounts
-    [ ] - Network Isolation
-    [x] - UID/GID Maps
-[ ] Container's network internal replication (network fallback)
-
-[ ] Network custom configuration (slirp4netns?)
-
-[ ] Network internal bridges
-
-[ ] PSI usage metrics
+- [x] Rootless API architecture
+- [x] Stop/run/list/delete containers
+- [ ] YAML batch config/action support
+- [x] Custom PTY Handling
+- [x] Interactive shell mode (-it) / Detach mode (-d)
+- [ ] Graceful PTY shutdown
+- [x] Docker registry complete compatibility
+- [ ] General registries compatibility
+- [ ] OCI-Compliant support
+    - [x] Hostname
+    - [ ] Resources
+    - [x] Process (user, args, env, cwd)
+    - [x] Cgroups
+    - [ ] Capabilities
+    - [x] Namespaces
+    - [x] Masked Paths
+    - [x] Read-Only Paths
+    - [x] Mounts
+    - [ ] Network Isolation
+    - [x] UID/GID Maps
+- [ ] Container's network internal replication (network fallback)
+- [ ] Network custom configuration (slirp4netns?)
+- [ ] Network internal bridges
+- [ ] PSI usage metrics
 
 ## Contributing
 
