@@ -12,6 +12,7 @@ pub fn spec_to_flag(s: LinuxNamespaceType) -> CloneFlags {
         // CLONE_NEWTIME requires kernel 5.6+
         LinuxNamespaceType::Time => CloneFlags::empty(),
         LinuxNamespaceType::Cgroup => CloneFlags::CLONE_NEWCGROUP,
-        LinuxNamespaceType::Network => CloneFlags::CLONE_NEWNET,
+        // TODO
+        LinuxNamespaceType::Network => CloneFlags::empty(),
     }
 }
