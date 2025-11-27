@@ -118,7 +118,7 @@ fn spawn_container(
 
         close(pipe_read_fd)?;
 
-        ugid::map_ugid(child_pid, host_uid, host_gid)?;
+        ugid::map_ugid(child_pid, spec.linux().as_ref(), host_uid, host_gid)?;
 
         devices::apply_device_rules(spec, child_pid, container_id)?;
 
@@ -184,7 +184,7 @@ fn spawn_container(
             woody!("Writing map files for child {}", child_pid);
         }
 
-        ugid::map_ugid(child_pid, host_uid, host_gid)?;
+        ugid::map_ugid(child_pid, spec.linux().as_ref(), host_uid, host_gid)?;
 
         devices::apply_device_rules(spec, child_pid, container_id)?;
 
