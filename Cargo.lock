@@ -1928,6 +1928,7 @@ dependencies = [
  "clap",
  "nix",
  "oci-spec",
+ "tempfile",
 ]
 
 [[package]]
