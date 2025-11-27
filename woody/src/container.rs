@@ -8,16 +8,14 @@ use nix::{
 };
 use oci_spec::runtime::{LinuxCapabilities, Spec};
 
+#[allow(unused)]
+use crate::{macros::container, network};
+
 pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
     close(pipe_write_fd).unwrap();
     wait_for_parent_setup(pipe_read_fd);
 
-    if let Some(hostname) = spec.hostname() {
-        nix::unistd::sethostname(hostname)
-            .context("Failed to set hostname")
-            .unwrap();
-    }
-
+    configure_hostname(spec);
     configure_fs(spec).expect("Error configuring fs");
     exec_user_process(spec);
 
@@ -25,15 +23,25 @@ pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
 }
 
 fn wait_for_parent_setup(pipe_read_fd: i32) {
-    println!("[woody-child] Waiting for parent to write maps...");
+    #[cfg(feature = "dbg-sgn")]
+    container!("Waiting for parent to write maps...");
     let mut buf = [0u8; 1];
-    read(pipe_read_fd, &mut buf).expect("[Child] read from pipe failed");
-    close(pipe_read_fd).expect("[Child] Could not close pipe");
-    println!("[woody-child] Signal received. Maps are written.");
+    read(pipe_read_fd, &mut buf).expect("Read from pipe failed");
+    close(pipe_read_fd).expect("Could not close pipe");
+    #[cfg(feature = "dbg-sgn")]
+    container!("Signal received. Maps are written.");
 
-    // TODO set uid/gid handling
-    setuid(Uid::from_raw(0)).expect("[Child] setuid(0) failed");
-    setgid(Gid::from_raw(0)).expect("[Child] setgid(0) failed");
+    // TODO verify for removal
+    setuid(Uid::from_raw(0)).expect("setuid(0) failed");
+    setgid(Gid::from_raw(0)).expect("setgid(0) failed");
+}
+
+fn configure_hostname(spec: &Spec) {
+    if let Some(hostname) = spec.hostname() {
+        nix::unistd::sethostname(hostname)
+            .context("Failed to set hostname")
+            .unwrap();
+    }
 }
 
 fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
@@ -54,7 +62,8 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
         let path = Path::new(&mount_dest);
         std::fs::create_dir_all(path)?;
 
-        println!("Mounting {:?} to {:?}", m.source(), m.destination());
+        #[cfg(feature = "dbg-mnt")]
+        container!("Mounting {:?} to {:?}", m.source(), m.destination());
         let mut source = m.source().as_ref().map(|p| p.to_str().unwrap());
         let mut fstype = m.typ().as_ref().map(|s| s.as_str());
 
@@ -105,10 +114,12 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
             Some(data_options.join(","))
         };
         
+        #[cfg(feature = "dbg-mnt")]
         dbg!(&source, &fstype, &flags, &data_str);
 
         if fstype == Some("sysfs") {
-            println!("> [Fix] Detected sysfs mount without Network Namespace. Switching to BIND mount.");
+            #[cfg(feature = "dbg-mnt")]
+            container!("> [Fix] Detected sysfs mount without Network Namespace. Switching to BIND mount.");
             
             source = Some("/sys"); 
             fstype = None; 
@@ -116,7 +127,8 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
         }
 
         else if fstype == Some("cgroup") {
-            println!("> [Fix] Switching cgroup to BIND mount.");
+            #[cfg(feature = "dbg-mnt")]
+            container!("> [Fix] Switching cgroup to BIND mount.");
             // We bind mount the host's cgroup hierarchy
             source = Some("/sys/fs/cgroup"); 
             fstype = None; 
@@ -141,7 +153,10 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
     )
     .context("Failed to bind mount rootfs")?;
 
-    println!("[Container] Changing CWD to {:?}", &rootfs);
+    // network::setup_container_network(&rootfs)?;
+
+    #[cfg(feature = "dbg-mnt")]
+    container!("Changing CWD to {:?}", &rootfs);
     env::set_current_dir(&rootfs).context("Failed to cd into new root")?;
 
     pivot_root(".", ".").context("Could not pivot root")?;
@@ -155,10 +170,12 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
             for path_str in ro_paths {
                 let ro_path = Path::new(path_str);
                 if !ro_path.exists() {
-                    println!("[Container] read-only path {} does not exist, skipping.", path_str);
+                    #[cfg(feature = "dbg-rop")]
+                    container!("Read-only path {} does not exist, skipping.", path_str);
                     continue;
                 }
-                println!("[Container] Making path {} read-only", path_str);
+                #[cfg(feature = "dbg-rop")]
+                container!("Making path {} read-only", path_str);
 
                 mount(
                     Some(path_str.as_str()),
@@ -184,20 +201,24 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
             for path_str in masked_paths {
                 let masked_path = Path::new(path_str);
                 if !masked_path.exists() {
-                    println!("[Container] masked path {} does not exist, skipping.", path_str);
+                    #[cfg(feature = "dbg-mskp")]
+                    container!("Masked path {} does not exist, skipping.", path_str);
                     continue;
                 }
-                println!("[Container] Masking path {}", path_str);
+                #[cfg(feature = "dbg-mskp")]
+                container!("Masking path {}", path_str);
 
                 let metadata = match std::fs::symlink_metadata(masked_path) {
                     Ok(m) => m,
                     Err(e) => {
-                        println!("[woody] Warning: could not get metadata for {}: {}", path_str, e);
+                        #[cfg(feature = "dbg-mskp")]
+                        container!("Warning: could not get metadata for {}: {}", path_str, e);
                         continue;
                     }
                 };
 
-                println!("[Container] Masking path: {}", path_str);
+                #[cfg(feature = "dbg-mskp")]
+                container!("Masking path: {}", path_str);
 
                 if metadata.is_dir() {
                     // CASE A: It is a Directory
@@ -234,6 +255,7 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
 }
 
 fn set_caps(caps: &Option<LinuxCapabilities>) -> anyhow::Result<()> {
+    #[cfg(feature = "dbg-caps")]
     dbg!(&caps);
 
     if let Some(capabilities) = caps {
@@ -252,7 +274,8 @@ fn set_caps(caps: &Option<LinuxCapabilities>) -> anyhow::Result<()> {
                         format!("CAP_{}", s)
                     };
 
-                    dbg!(&cap_string);
+                    #[cfg(feature = "dbg-caps")]
+                    container!(&cap_string);
 
                     // OCI names are "CAP_SYS_ADMIN", caps crate expects "SYS_ADMIN"
                     let cap = caps::Capability::from_str(&cap_string)
