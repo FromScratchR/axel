@@ -2,7 +2,7 @@
 
 axel is a experimental daemonless container management tool which has it's own hand-crafted container runtime, *woody* which works like 'runc'.
 
-<img src=".github/axel.png" align="right" height="130px" />
+<img src=".github/axel.png" align="right" height="175px" />
 
 The project's main goal is to learn what really containers are, how they are made and how they work, as well as to develop something valuable on the path;
 It is very lightweight and runs on a simple spawned process which does not require a daemon in order to run, looks much more like a youki/Podman than a Docker.
