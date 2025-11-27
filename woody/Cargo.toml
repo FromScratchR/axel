@@ -11,4 +11,20 @@ clap = { version = "4.0", features = ["derive"] }
 caps = "0.5"
 
 [features]
-dbg = []
+dbg = ["dbg-ntwk", "dbg-caps", "dbg-mnt", "dbg-rop", "dbg-sgn", "dbg-flags"]
+# network
+dbg-ntwk = []
+# capabilities
+dbg-caps = []
+# mount
+dbg-mnt = []
+# read-only paths
+dbg-rop = []
+# masked paths
+dbg-mskp = []
+# woody to container signal
+dbg-sgn = []
+# mount flags
+dbg-flags = []
+# container PID
+dbg-pid = []
