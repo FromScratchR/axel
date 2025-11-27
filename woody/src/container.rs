@@ -25,9 +25,11 @@ pub fn main(pipe_read_fd: i32, pipe_write_fd: i32, spec: &Spec) -> isize {
 fn wait_for_parent_setup(pipe_read_fd: i32) {
     #[cfg(feature = "dbg-sgn")]
     container!("Waiting for parent to write maps...");
+
     let mut buf = [0u8; 1];
     read(pipe_read_fd, &mut buf).expect("Read from pipe failed");
     close(pipe_read_fd).expect("Could not close pipe");
+
     #[cfg(feature = "dbg-sgn")]
     container!("Signal received. Maps are written.");
 
