@@ -26,11 +26,11 @@ Unlike Podman it doesn't depends as a daemon like conmon or dockerd like Docker,
 
 - [x] Rootless API architecture
 - [x] Run/list/stop/delete containers
-- [ ] YAML batch config/action support
-- [x] Custom PTY Handling
-- [x] Interactive shell mode (-it) / Detach mode (-d)
-- [ ] Graceful PTY shutdown
 - [x] Docker registry complete compatibility
+- [x] Interactive shell mode (-it) / Detach mode (-d)
+- [x] Custom PTY Handling
+- [ ] YAML batch config/action support
+- [ ] Graceful PTY shutdown
 - [ ] General registries compatibility
 - [ ] OCI-Compliant support
     - [x] Hostname
