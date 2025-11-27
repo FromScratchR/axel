@@ -4,6 +4,7 @@ mod io;
 mod macros;
 mod devices;
 mod ugid;
+mod network;
 
 use anyhow::Context;
 use clap::Parser;
@@ -89,7 +90,7 @@ fn spawn_container(
         }
     };
 
-    #[cfg(feature = "dbg")]
+    #[cfg(feature = "dbg-flags")]
     println!("[woody] using {:?} flags", flags);
 
     if detach {
@@ -122,7 +123,7 @@ fn spawn_container(
 
         devices::apply_device_rules(spec, child_pid, container_id)?;
 
-        #[cfg(feature = "dbg")] {
+        #[cfg(feature = "dbg-sgn")] {
             woody!("Maps written.");
             woody!("Signaling child to continue.");
         }
