@@ -1,6 +1,6 @@
 # `axel`
 
-<img src=".github/axel.png" align="right" height="200px" />
+<img src=".github/axel-icon.png" align="right" height="165px" />
 
 axel is a experimental daemonless container management tool which has it's own hand-crafted container runtime, *woody* which works like 'runc'.
 
