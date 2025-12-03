@@ -1,4 +1,4 @@
-use std::{env, ffi::CString, path::Path, str::FromStr};
+use std::{env, ffi::CString, fs::create_dir_all, path::Path, str::FromStr};
 
 use anyhow::Context;
 use caps::{CapSet, CapsHashSet};
@@ -146,6 +146,16 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
         )?;
     }
 
+    // Basic network fallback
+    let resolv_path = rootfs.join("etc/resolv.conf");
+
+    // Create the file if it doesn't exist
+    if !resolv_path.exists() {
+         std::fs::File::create(&resolv_path)?;
+    }
+    std::fs::write(&resolv_path, "nameserver 8.8.8.8\n")
+        .context("Failed to write public DNS")?;
+
     mount(
         Some(rootfs),
         rootfs,
@@ -212,7 +222,7 @@ fn configure_fs(spec: &Spec) -> anyhow::Result<()> {
 
                 let metadata = match std::fs::symlink_metadata(masked_path) {
                     Ok(m) => m,
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(feature = "dbg-mskp")]
                         container!("Warning: could not get metadata for {}: {}", path_str, e);
                         continue;
