@@ -220,7 +220,7 @@ fn spawn_container(
         tcsetattr(term_fd, SetArg::TCSAFLUSH, &termios).context("tcsetattr failed")?;
 
         #[cfg(feature = "dbg")]
-        woody!("[woody-debug] Terminal is in raw mode");
+        woody!("Terminal is in raw mode");
 
         let mut fds = [
             PollFd::new(term_fd, PollFlags::POLLIN),
