@@ -10,14 +10,10 @@ mod network;
 use anyhow::Context;
 use clap::Parser;
 use nix::{
-    poll::{poll, PollFd, PollFlags},
-    pty::openpty,
-    sched::{clone, CloneFlags},
-    sys::{
+    errno::Errno, poll::{poll, PollFd, PollFlags}, pty::openpty, sched::{clone, CloneFlags}, sys::{
         termios::{tcgetattr, tcsetattr, LocalFlags, SetArg},
         wait::waitpid,
-    },
-    unistd::{close, dup2, getgid, getuid, read, setsid, write},
+    }, unistd::{close, dup2, getgid, getuid, read, setsid, write}
 };
 use oci_spec::runtime::{Spec};
 use std::{
@@ -258,16 +254,31 @@ fn spawn_container(
             // Container is writing to master_fds 
             // so we propagate until the source (stdin of this process)
             if let Some(revents) = fds[1].revents() {
+                // Check if the PTY hung up (Child closed/exited)
+                if revents.contains(PollFlags::POLLHUP) {
+                    #[cfg(feature = "dbg")]
+                    woody!("Master PTY received POLLHUP. Child likely exited.");
+                    break;
+                }
+
                 if revents.contains(PollFlags::POLLIN) {
                     let mut buf = [0u8; 1024];
-                    let n = read(master_fd, &mut buf).context("read from master failed")?;
-                    if n == 0 {
-                        #[cfg(feature= "dbg")]
-                        woody!("master_fd read 0 bytes, breaking loop");
-                        break;
+
+                    match read(master_fd, &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            write(std::io::stdout().as_raw_fd(), &buf[..n])
+                            .context("write to stdout failed")?;
+                        }
+                        Err(e) => {
+                            if e == Errno::EIO {
+                                #[cfg(feature = "dbg")]
+                                woody!("Master PTY returned EIO (Slave closed). Exiting loop.");
+                                break;
+                            }
+                            // Propagate other actual errors
+                        }
                     }
-                    write(std::io::stdout().as_raw_fd(), &buf[..n])
-                        .context("write to stdout failed")?;
                 }
             }
         }
