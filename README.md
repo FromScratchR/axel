@@ -5,10 +5,10 @@
 A experimental daemonless container management tool.
 
 - **Rootless**: Do not require privileged state users in order to run.
-- **Zero Contiguos-Overhead**: Do not lie on background services to work.
+- **No Daemons**: Do not lie on background services to work.
 - **Lightweight**: **~[]x**mb binary size.
 - **Self-Contained**: Requires no external deps.
-- **Easy-to-use**: Simple commands executes the entire workflow.
+- **Easy-to-Use**: Simple commands executes the entire workflow.
 
 Axel doesn't depends on daemons and has it's own hand-crafted container runtime, *woody* which works like *runc*.
 
@@ -25,13 +25,13 @@ Unlike Podman it doesn't depends on a daemon like _conmon_ or _dockerd_ like Doc
 
 ## How to use
 
-## Commands
+### Commands
 
 ## OCI Support
 
-## Shades
-
 ## Architecture
+
+## Shades
 
 ## Roadmap
 
