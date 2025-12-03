@@ -142,18 +142,16 @@ fn spawn_container(
 
         let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
 
-        // Generate session helper fn
-        nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
-
         const STACK_SIZE: usize = 1024 * 1024;
         let mut stack = vec![0; STACK_SIZE];
 
-        let spec_clone = spec.clone();
         let child_fn = move || {
             close(master_fd).unwrap();
 
             // Set new terminal session as detached
             setsid().unwrap();
+
+            nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
 
             // Set section master
             unsafe { tiocsctty(slave_fd, 1).expect("Failed to set controlling TTY"); }
@@ -162,9 +160,10 @@ fn spawn_container(
             dup2(slave_fd, 0).unwrap();
             dup2(slave_fd, 1).unwrap();
             dup2(slave_fd, 2).unwrap();
+            // Close anchor slave_fd on fd's table
             close(slave_fd).unwrap();
 
-            container::main(pipe_read_fd, pipe_write_fd, &spec_clone)
+            container::main(pipe_read_fd, pipe_write_fd, &spec)
         };
 
         let child_pid = clone(
@@ -177,6 +176,7 @@ fn spawn_container(
 
         // Remove base fd from process
         close(slave_fd)?;
+        // Read is not needed
         close(pipe_read_fd)?;
 
         let child_pid_path = pids.join(container_id);
@@ -192,21 +192,24 @@ fn spawn_container(
 
         devices::apply_device_rules(spec, child_pid, container_id)?;
 
-        if let Some(linux) = spec.linux() {
-            cgroups::apply(linux, child_pid).context("Failed to apply cgroups")?;
-        }
+        cgroups::handle(&spec, child_pid)?;
 
         #[cfg(feature = "dbg")] {
             woody!("[woody] Maps written.");
             woody!("[woody] Signaling child to continue.");
         }
 
+        // Sinalize to OK to child
         write(pipe_write_fd, &[1]).context("write to pipe failed")?;
+        // Write is not needed anymore
         close(pipe_write_fd)?;
 
+        // Get main terminal fd
         let term_fd = std::io::stdin().as_raw_fd();
+        // Get current terminal information (create a snapshot of it)
         let mut termios = tcgetattr(term_fd).context("tcgetattr failed")?;
 
+        // Automatically restore terminal previous state
         let _term_guard = TerminalGuard {
             fd: term_fd,
             old_state: termios.clone(),
@@ -217,21 +220,25 @@ fn spawn_container(
 
         // Apply custom flags to this process' terminal (prepare for multiplexing)
         termios.local_flags &= !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN | LocalFlags::ISIG);
+        // Apply new rules
         tcsetattr(term_fd, SetArg::TCSAFLUSH, &termios).context("tcsetattr failed")?;
 
         #[cfg(feature = "dbg")]
         woody!("Terminal is in raw mode");
 
+        // At this point, main_fd points to container's master_fd which points to the slave_fd
+        // which is connected to stdin, stdout and stderr of container
         let mut fds = [
             PollFd::new(term_fd, PollFlags::POLLIN),
             PollFd::new(master_fd, PollFlags::POLLIN),
         ];
 
+        // Set handling for receiving / sending information on a two-sided way (receive/send to container)
         loop {
             // Multiplex by waiting term_fd (stdin of this process) / master_fs (PTY portal)
             poll(&mut fds, -1).context("poll failed")?;
 
-            // Keyboard (stdin)
+            // Keyboard (stdin) to container's stdin
             if let Some(revents) = fds[0].revents() {
                 if revents.contains(PollFlags::POLLIN) {
                     let mut buf = [0u8; 1024];
@@ -248,6 +255,8 @@ fn spawn_container(
             }
 
             // Shell (master_fd)
+            // Container is writing to master_fds 
+            // so we propagate until the source (stdin of this process)
             if let Some(revents) = fds[1].revents() {
                 if revents.contains(PollFlags::POLLIN) {
                     let mut buf = [0u8; 1024];
