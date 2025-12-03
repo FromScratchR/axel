@@ -3,9 +3,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use nix::unistd::Pid;
-use oci_spec::runtime::{Linux, LinuxResources};
+use oci_spec::runtime::{Linux, LinuxResources, Spec};
+
+use crate::macros::woody;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+pub fn handle(spec: &Spec, child_pid: Pid) -> anyhow::Result<()> {
+    if let Some(linux) = spec.linux() {
+        self::apply(linux, child_pid).context("Failed to apply cgroups")?;
+    }
+
+    Ok(())
+}
 
 pub fn apply(linux: &Linux, pid: Pid) -> Result<()> {
     apply_internal(
@@ -24,7 +34,7 @@ fn apply_internal(linux: &Linux, pid: Pid, cgroup_root: &Path, self_cgroup_path:
         return Err(anyhow!("Cgroup v2 not detected (missing cgroup.controllers). Woody supports v2 only."));
     }
 
-    // Resolve the absolute path where we will create the cgroup
+    // Resolve the absolute path where cgroup will be
     let cgroup_path = get_cgroup_path(
         linux.cgroups_path().as_ref(), 
         cgroup_root, 
@@ -34,18 +44,18 @@ fn apply_internal(linux: &Linux, pid: Pid, cgroup_root: &Path, self_cgroup_path:
     #[cfg(feature = "dbg-cg")]
     woody!("Creating cgroup at {:?}", cgroup_path);
 
-    // 3. Create the directory
+    // Create the directory
     if let Err(e) = fs::create_dir_all(&cgroup_path) {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            println!("[woody] Warning: Failed to create cgroup directory at {:?}: Permission Denied.", cgroup_path);
-            println!("[woody] Hint: This usually means the shell is not running in a delegated cgroup.");
-            println!("[woody] Continuing without resource limits...");
+            woody!("Warning: Failed to create cgroup directory at {:?}: Permission Denied.", cgroup_path);
+            woody!("Hint: This usually means the shell is not running in a delegated cgroup.");
+            woody!("Continuing without resource limits...");
             return Ok(());
         }
         return Err(e).context(format!("Failed to create cgroup directory at {:?}", cgroup_path));
     }
 
-    // 4. Apply resource limits
+    // Apply resource limits
     if let Some(resources) = linux.resources() {
         apply_resources(&cgroup_path, resources)?;
     }
