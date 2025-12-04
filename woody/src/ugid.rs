@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use anyhow::Context;
-use nix::unistd::Pid;
+use nix::unistd::{getgid, getuid, Pid};
 use oci_spec::runtime::Linux;
 
 /// Maps host uid/gid into valid root user
@@ -9,9 +9,10 @@ use oci_spec::runtime::Linux;
 pub fn map_ugid(
     child_pid: Pid,
     linux: Option<&Linux>,
-    host_uid: nix::unistd::Uid,
-    host_gid: nix::unistd::Gid,
 ) -> anyhow::Result<()> {
+    let host_uid = getuid();
+    let host_gid = getgid();
+
     #[cfg(feature = "dbg")]
     woody!("Writing map files for child {}", child_pid);
 
