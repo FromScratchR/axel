@@ -4,7 +4,7 @@
 
 A experimental daemonless container management tool.
 
-- **Rootless**: Do not require privileged state users in order to run.
+- **Rootless**: Do not require high-privilege users in order to run.
 - **No Daemons**: Do not lie on background services to work.
 - **Lightweight**: **~[]x**mb binary size.
 - **Self-Contained**: Requires no external deps.
@@ -13,6 +13,7 @@ A experimental daemonless container management tool.
 Axel doesn't depends on daemons and has it's own hand-crafted container runtime, *woody* which works like *runc*.
 
 The project's main goal is to learn what really containers are, how they are made and how they work, as well as to develop something valuable on the path;
+
 It is very lightweight and runs on a simple spawned process managed by Woody which does not require a daemon in order to run, looks much more like a youki/Podman than a Docker.
 And the best: it is rootless; What greatly reduces the surface of security attacks.
 
