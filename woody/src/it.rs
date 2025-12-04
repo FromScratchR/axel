@@ -1,11 +1,12 @@
 use std::os::fd::AsRawFd;
 
 use anyhow::Context;
-use nix::{errno::Errno, poll::{poll, PollFd, PollFlags}, sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg}, unistd::read};
+use nix::{errno::Errno, poll::{poll, PollFd, PollFlags}, sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg}, unistd::{dup2, read, setsid}};
 
 use crate::io::TerminalGuard;
 
-/// Interactive (-it) mode
+/// Create current terminal termios and uses TermGuard in order to save its state;
+/// As well as evoke poll();
 ///
 pub fn interactive_mode(master_fd: i32) -> anyhow::Result<()> {
     let term_fd = std::io::stdin().as_raw_fd();
@@ -32,6 +33,8 @@ pub fn interactive_mode(master_fd: i32) -> anyhow::Result<()> {
     crate::it::pool(term_fd, master_fd)
 }
 
+/// Handles new PTY state
+///
 fn pool(term_fd: i32, master_fd: i32) -> anyhow::Result<()> {
     // At this point, main_fd points to container's master_fd which points to the slave_fd
     // which is connected to stdin, stdout and stderr of container
@@ -95,4 +98,20 @@ fn pool(term_fd: i32, master_fd: i32) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Assign slave_fd as process stdin/stdout/stderr
+///
+pub fn set_slave(slave_fd: i32) {
+    // Set new terminal session as detached
+    setsid().unwrap();
+    // Generate section master fn
+    nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
+    // Set section master
+    unsafe { tiocsctty(slave_fd, 1).expect("Failed to set controlling TTY"); }
+
+    // Set stdin / out / err onto slave_fd
+    dup2(slave_fd, 0).unwrap();
+    dup2(slave_fd, 1).unwrap();
+    dup2(slave_fd, 2).unwrap();
 }
