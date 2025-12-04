@@ -9,11 +9,13 @@ mod network;
 mod exec;
 mod ns;
 mod it;
+mod monitor;
+mod consts;
 
 use anyhow::Context;
 use clap::Parser;
 use nix::{
-    pty::openpty, sched::clone, sys::wait::waitpid, unistd::{close, dup2, setsid, write}
+    pty::openpty, sched::clone, sys::wait::waitpid, unistd::{close, dup2, setsid, write, ForkResult}
 };
 use oci_spec::runtime::{Spec};
 use std::{
@@ -40,7 +42,7 @@ enum OciCommand {
         #[arg(short, long)]
         pids_path: PathBuf,
         #[arg(short, long)]
-        detach: bool,
+        it: bool,
         container_id: String,
     },
     /// Execute a command in a running container
@@ -62,11 +64,11 @@ fn main() -> anyhow::Result<()> {
             bundle,
             pids_path,
             container_id,
-            detach,
+            it,
         } => {
             let spec_path = bundle.join("config.json");
             let spec = Spec::load(spec_path).context("Failed to load OCI spec")?;
-            spawn_container(&spec, &pids_path, &container_id, detach)?;
+            spawn_container(&spec, &pids_path, &container_id, it)?;
         }
         OciCommand::Exec {
             pids_path,
@@ -84,101 +86,34 @@ fn spawn_container(
     spec: &Spec,
     pids: &PathBuf,
     container_id: &String,
-    detach: bool,
+    it: bool,
 ) -> anyhow::Result<i32> {
-    let flags = ns::resolve_flags(spec)?;
+    // Init double-fork pattern
+    // This create a decoupled monitor process which handles the cleanup and metrics of the container
+    match unsafe { nix::unistd::fork() } {
+        Ok(ForkResult::Parent { child: monitor_pid } ) => {
+            if it {
+                waitpid(monitor_pid, None)?;
+            }
+        },
+        Ok(ForkResult::Child) => {
+            let container_pid = monitor::start(container_id, spec, it).unwrap();
+            let container_pid_path = pids.join(container_id);
 
-    #[cfg(feature = "dbg-flags")]
-    println!("[woody] using {:?} flags", flags);
+            std::fs::write(container_pid_path, container_pid.as_raw().to_string())
+            .context("Could not write container PID")?;
 
-    let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
-
-    const STACK_SIZE: usize = 1024 * 1024;
-    let mut stack = vec![0; STACK_SIZE];
-
-    let pty = openpty(None, None).context("openpty failed")?;
-    let master_fd = pty.master;
-    let slave_fd = pty.slave;
-
-    let child_fn = move || {
-        if !detach {
-            // Set new terminal session as detached
-            setsid().unwrap();
-            // Generate section master fn
-            nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
-            // Set section master
-            unsafe { tiocsctty(slave_fd, 1).expect("Failed to set controlling TTY"); }
-
-            // Set stdin / out / err onto slave_fd
-            dup2(slave_fd, 0).unwrap();
-            dup2(slave_fd, 1).unwrap();
-            dup2(slave_fd, 2).unwrap();
+            std::process::exit(0)
         }
-
-        close(master_fd).unwrap();
-        close(slave_fd).unwrap();
-
-        container::main(pipe_read_fd, pipe_write_fd, &spec)
-    };
-
-    let child_pid = clone(
-        Box::new(child_fn),
-        &mut stack,
-        flags,
-        Some(nix::sys::signal::Signal::SIGCHLD as i32),
-    )
-    .context("clone() failed")?;
-
-    // Parent does not need slave_fd
-    close(slave_fd)?;
-
-    // Read is not needed
-    close(pipe_read_fd)?;
-
-    let child_pid_path = pids.join(container_id);
-    std::fs::write(child_pid_path, child_pid.as_raw().to_string())
-        .context("Could not write container PID")?;
+        Err(e) => {
+            woody_err!("Failed to init monitor: {:?}", e);
+        }
+    }
 
     #[cfg(feature = "dbg")] {
         woody!("Cloned child with PID: {}", child_pid);
         woody!("Writing map files for child {}", child_pid);
     }
-
-    // Configure container env
-    ugid::map_ugid(child_pid, spec.linux().as_ref())?;
-
-    devices::apply_device_rules(spec, child_pid, container_id)?;
-
-    cgroups::handle(&spec, child_pid)?;
-
-    #[cfg(feature = "dbg")] {
-        woody!("[woody] Maps written.");
-        woody!("[woody] Signaling child to continue.");
-    }
-
-    // Sinalize to OK to child
-    write(pipe_write_fd, &[1]).context("write to pipe failed")?;
-    // Write is not needed anymore
-    close(pipe_write_fd)?;
-
-    woody!("Process running with PID: {}.", &child_pid);
-
-    #[cfg(feature = "dbg")] {
-        woody!("Poll loop exited");
-        woody!("Waiting for child process {}", child_pid);
-    }
-
-    if !detach {
-        crate::it::interactive_mode(master_fd)?;
-
-        // Close master to ensure child receives EOF if it hasn't exited yet
-        close(master_fd)?;
-
-        waitpid(child_pid, None).context("waitpid() failed")?;
-    }
-
-    #[cfg(feature = "dbg")]
-    woody!("waitpid finished");
 
     woody!("Process exited.");
 
