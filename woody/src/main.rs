@@ -13,18 +13,13 @@ mod it;
 use anyhow::Context;
 use clap::Parser;
 use nix::{
-    errno::Errno, poll::{poll, PollFd, PollFlags}, pty::openpty, sched::{clone, CloneFlags}, sys::{
-        termios::{tcgetattr, tcsetattr, LocalFlags, SetArg},
-        wait::waitpid,
-    }, unistd::{close, dup2, getgid, getuid, read, setsid, write}
+    pty::openpty, sched::clone, sys::wait::waitpid, unistd::{close, dup2, setsid, write}
 };
 use oci_spec::runtime::{Spec};
 use std::{
-    os::unix::io::AsRawFd,
     path::PathBuf,
 };
 
-use crate::{io::TerminalGuard};
 #[allow(unused)]
 use crate::macros::{woody, woody_err};
 
