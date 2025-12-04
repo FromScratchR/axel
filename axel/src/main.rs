@@ -33,8 +33,11 @@ enum Commands {
         #[arg(short='d', long)]
         detach: bool
     },
+    /// Connects into a running image
     Hook {
-
+        container_id: String,
+        #[arg(last = true)]
+        command: Vec<String>,
     },
     List,
     Stop {
@@ -51,7 +54,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run { image, command, detach } => {
             run_container(&image, command, detach).await?;
         }
-        Commands::Hook {} => todo!(),
+        Commands::Hook { container_id, command } => {
+            hook_container(container_id, command)?;
+        }
         Commands::List => {
             list_containers()?;
         }
@@ -64,18 +69,39 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn hook_container(container_id: String, command: Vec<String>) -> anyhow::Result<()> {
+    let container_name = utils::normalize_container_id(&container_id);
+    let pids_path = PathBuf::from("./axel-pids");
+
+    let bin_path = std::env::current_exe()?.parent().unwrap().join("woody");
+    let mut cmd = Command::new(bin_path);
+    
+    cmd.arg("exec")
+        .arg("--pids-path").arg(pids_path)
+        .arg(container_name)
+        .args(command);
+
+    let status = cmd.status()?;
+    if !status.success() {
+        axel_err!("Woody exit status: {:?}", status);
+    }
+
+    Ok(())
+}
+
 fn stop_container(container_id: String) -> anyhow::Result<()> {
     let container_id = utils::normalize_container_id(container_id);
 
     let pids = PathBuf::from("./axel-pids");
     let target = pids.join(&container_id);
+
     #[cfg(feature = "dbg")]
     dbg!(&target);
 
     let container_pid = str::parse::<i32>(&fs::read_to_string(&target)?)?;
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(container_pid), nix::sys::signal::SIGTERM)?;
-
     fs::remove_file(target)?;
+
     axel!("{} has stopped", container_id);
 
     Ok(())
@@ -108,6 +134,7 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
     let rootfs_path = image_base_path.join("rootfs");
     let image_config: network::ConfigDetails;
 
+    // Check for image on cache, otherwise get from registry
     if rootfs_path.exists() && fs::read_dir(&rootfs_path)?.next().is_some() {
         axel!("Using cached image: {}", image_ref);
 
@@ -152,6 +179,7 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
         ).await?;
     }
 
+    // TODO set cache to OCI
     axel!("Generating OCI spec...");
 
     let spec = oci::generate_oci_config(&image_config, &container_name, command)?;
@@ -203,15 +231,13 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
             .arg(container_name.clone());
     }
 
-    // -it mode
+    // -d mode
     if detach { cmd.arg("--detach"); }
 
     axel!("Executing woody command: {:?}", cmd);
 
     let status = cmd.status()?;
-    if status.success() {
-        axel!("Container '{}' started successfully via woody.", container_name);
-    } else {
+    if !status.success() {
         axel_err!("Woody exit status: {:?}", status);
     }
 
