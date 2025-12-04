@@ -134,6 +134,9 @@ fn spawn_container(
     )
     .context("clone() failed")?;
 
+    // Parent does not need slave_fd
+    close(slave_fd)?;
+
     // Read is not needed
     close(pipe_read_fd)?;
 
@@ -146,6 +149,7 @@ fn spawn_container(
         woody!("Writing map files for child {}", child_pid);
     }
 
+    // Configure container env
     ugid::map_ugid(child_pid, spec.linux().as_ref())?;
 
     devices::apply_device_rules(spec, child_pid, container_id)?;
@@ -171,6 +175,10 @@ fn spawn_container(
 
     if !detach {
         crate::it::interactive_mode(master_fd)?;
+
+        // Close master to ensure child receives EOF if it hasn't exited yet
+        close(master_fd)?;
+
         waitpid(child_pid, None).context("waitpid() failed")?;
     }
 
