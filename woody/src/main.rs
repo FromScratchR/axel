@@ -6,6 +6,9 @@ mod devices;
 mod ugid;
 mod cgroups;
 mod network;
+mod exec;
+mod ns;
+mod it;
 
 use anyhow::Context;
 use clap::Parser;
@@ -45,6 +48,15 @@ enum OciCommand {
         detach: bool,
         container_id: String,
     },
+    /// Execute a command in a running container
+    #[command(name = "exec")]
+    Exec {
+        #[arg(short, long)]
+        pids_path: PathBuf,
+        container_id: String,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,6 +73,13 @@ fn main() -> anyhow::Result<()> {
             let spec = Spec::load(spec_path).context("Failed to load OCI spec")?;
             spawn_container(&spec, &pids_path, &container_id, detach)?;
         }
+        OciCommand::Exec {
+            pids_path,
+            container_id,
+            command,
+        } => {
+            exec::run(pids_path, container_id, command)?;
+        }
     };
 
     Ok(())
@@ -72,83 +91,26 @@ fn spawn_container(
     container_id: &String,
     detach: bool,
 ) -> anyhow::Result<i32> {
-    let host_uid = getuid();
-    let host_gid = getgid();
-
-    let mut flags = CloneFlags::empty();
-
-    if let Some(linux_spec) = spec.linux() {
-        if let Some(namespaces) = linux_spec.namespaces() {
-            for nmspc in namespaces {
-                flags |= utils::spec_to_flag(nmspc.typ());
-            }
-        }
-    };
+    let flags = ns::resolve_flags(spec)?;
 
     #[cfg(feature = "dbg-flags")]
     println!("[woody] using {:?} flags", flags);
 
-    if detach {
-        let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
+    let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
 
-        const STACK_SIZE: usize = 1024 * 1024;
-        let mut stack = vec![0; STACK_SIZE];
+    const STACK_SIZE: usize = 1024 * 1024;
+    let mut stack = vec![0; STACK_SIZE];
 
-        let spec_clone = spec.clone();
-        let child_fn = || container::main(pipe_read_fd, pipe_write_fd, &spec_clone);
+    let pty = openpty(None, None).context("openpty failed")?;
+    let master_fd = pty.master;
+    let slave_fd = pty.slave;
 
-        let child_pid = clone(
-            Box::new(child_fn),
-            &mut stack,
-            flags,
-            Some(nix::sys::signal::Signal::SIGCHLD as i32),
-        )
-        .context("clone() failed")?;
-
-        let child_pid_path = pids.join(container_id);
-        std::fs::write(child_pid_path, child_pid.as_raw().to_string())
-            .context("Could not write container PID")?;
-
-        #[cfg(feature = "dbg")]
-        woody!("Cloned child with PID: {}", child_pid);
-
-        close(pipe_read_fd)?;
-
-        ugid::map_ugid(child_pid, spec.linux().as_ref(), host_uid, host_gid)?;
-
-        devices::apply_device_rules(spec, child_pid, container_id)?;
-
-        if let Some(linux) = spec.linux() {
-            cgroups::apply(linux, child_pid).context("Failed to apply cgroups")?;
-        }
-
-        #[cfg(feature = "dbg-sgn")] {
-            woody!("Maps written.");
-            woody!("Signaling child to continue.");
-        }
-
-        write(pipe_write_fd, &[1]).context("write to pipe failed")?;
-        close(pipe_write_fd)?;
-
-        woody!("Process exited.");
-    } else {
-        let pty = openpty(None, None).context("openpty failed")?;
-        let master_fd = pty.master;
-        let slave_fd = pty.slave;
-
-        let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
-
-        const STACK_SIZE: usize = 1024 * 1024;
-        let mut stack = vec![0; STACK_SIZE];
-
-        let child_fn = move || {
-            close(master_fd).unwrap();
-
+    let child_fn = move || {
+        if !detach {
             // Set new terminal session as detached
             setsid().unwrap();
-
+            // Generate section master fn
             nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
-
             // Set section master
             unsafe { tiocsctty(slave_fd, 1).expect("Failed to set controlling TTY"); }
 
@@ -156,143 +118,64 @@ fn spawn_container(
             dup2(slave_fd, 0).unwrap();
             dup2(slave_fd, 1).unwrap();
             dup2(slave_fd, 2).unwrap();
-            // Close anchor slave_fd on fd's table
-            close(slave_fd).unwrap();
-
-            container::main(pipe_read_fd, pipe_write_fd, &spec)
-        };
-
-        let child_pid = clone(
-            Box::new(child_fn),
-            &mut stack,
-            flags,
-            Some(nix::sys::signal::Signal::SIGCHLD as i32),
-        )
-        .context("clone() failed")?;
-
-        // Remove base fd from process
-        close(slave_fd)?;
-        // Read is not needed
-        close(pipe_read_fd)?;
-
-        let child_pid_path = pids.join(container_id);
-        std::fs::write(child_pid_path, child_pid.as_raw().to_string())
-            .context("Could not write container PID")?;
-
-        #[cfg(feature = "dbg")] {
-            woody!("Cloned child with PID: {}", child_pid);
-            woody!("Writing map files for child {}", child_pid);
         }
 
-        ugid::map_ugid(child_pid, spec.linux().as_ref(), host_uid, host_gid)?;
+        close(master_fd).unwrap();
+        close(slave_fd).unwrap();
 
-        devices::apply_device_rules(spec, child_pid, container_id)?;
+        container::main(pipe_read_fd, pipe_write_fd, &spec)
+    };
 
-        cgroups::handle(&spec, child_pid)?;
+    let child_pid = clone(
+        Box::new(child_fn),
+        &mut stack,
+        flags,
+        Some(nix::sys::signal::Signal::SIGCHLD as i32),
+    )
+    .context("clone() failed")?;
 
-        #[cfg(feature = "dbg")] {
-            woody!("[woody] Maps written.");
-            woody!("[woody] Signaling child to continue.");
-        }
+    // Read is not needed
+    close(pipe_read_fd)?;
 
-        // Sinalize to OK to child
-        write(pipe_write_fd, &[1]).context("write to pipe failed")?;
-        // Write is not needed anymore
-        close(pipe_write_fd)?;
+    let child_pid_path = pids.join(container_id);
+    std::fs::write(child_pid_path, child_pid.as_raw().to_string())
+        .context("Could not write container PID")?;
 
-        // Get main terminal fd
-        let term_fd = std::io::stdin().as_raw_fd();
-        // Get current terminal information (create a snapshot of it)
-        let mut termios = tcgetattr(term_fd).context("tcgetattr failed")?;
-
-        // Automatically restore terminal previous state
-        let _term_guard = TerminalGuard {
-            fd: term_fd,
-            old_state: termios.clone(),
-        };
-
-        #[cfg(feature = "dbg")]
-        woody!("Putting terminal in raw mode");
-
-        // Apply custom flags to this process' terminal (prepare for multiplexing)
-        termios.local_flags &= !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::IEXTEN | LocalFlags::ISIG);
-        // Apply new rules
-        tcsetattr(term_fd, SetArg::TCSAFLUSH, &termios).context("tcsetattr failed")?;
-
-        #[cfg(feature = "dbg")]
-        woody!("Terminal is in raw mode");
-
-        // At this point, main_fd points to container's master_fd which points to the slave_fd
-        // which is connected to stdin, stdout and stderr of container
-        let mut fds = [
-            PollFd::new(term_fd, PollFlags::POLLIN),
-            PollFd::new(master_fd, PollFlags::POLLIN),
-        ];
-
-        // Set handling for receiving / sending information on a two-sided way (receive/send to container)
-        loop {
-            // Multiplex by waiting term_fd (stdin of this process) / master_fs (PTY portal)
-            poll(&mut fds, -1).context("poll failed")?;
-
-            // Keyboard (stdin) to container's stdin
-            if let Some(revents) = fds[0].revents() {
-                if revents.contains(PollFlags::POLLIN) {
-                    let mut buf = [0u8; 1024];
-                    let n = read(term_fd, &mut buf).context("read from stdin failed")?;
-                    if n == 0 {
-                        #[cfg(feature= "dbg")]
-                        woody!("stdin read 0 bytes, breaking loop");
-
-                        break;
-                    }
-
-                    write(master_fd, &buf[..n]).context("write to master failed")?;
-                }
-            }
-
-            // Shell (master_fd)
-            // Container is writing to master_fds 
-            // so we propagate until the source (stdin of this process)
-            if let Some(revents) = fds[1].revents() {
-                // Check if the PTY hung up (Child closed/exited)
-                if revents.contains(PollFlags::POLLHUP) {
-                    #[cfg(feature = "dbg")]
-                    woody!("Master PTY received POLLHUP. Child likely exited.");
-                    break;
-                }
-
-                if revents.contains(PollFlags::POLLIN) {
-                    let mut buf = [0u8; 1024];
-
-                    match read(master_fd, &mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            write(std::io::stdout().as_raw_fd(), &buf[..n])
-                            .context("write to stdout failed")?;
-                        }
-                        Err(e) => {
-                            if e == Errno::EIO {
-                                #[cfg(feature = "dbg")]
-                                woody!("Master PTY returned EIO (Slave closed). Exiting loop.");
-                                break;
-                            }
-                            // Propagate other actual errors
-                        }
-                    }
-                }
-            }
-        }
-        
-        #[cfg(feature = "dbg")] {
-            woody!("Poll loop exited");
-            woody!("Waiting for child process {}", child_pid);
-        }
-
-        waitpid(child_pid, None).context("waitpid() failed")?;
-
-        #[cfg(feature = "dbg")]
-        woody!("waitpid finished");
+    #[cfg(feature = "dbg")] {
+        woody!("Cloned child with PID: {}", child_pid);
+        woody!("Writing map files for child {}", child_pid);
     }
+
+    ugid::map_ugid(child_pid, spec.linux().as_ref())?;
+
+    devices::apply_device_rules(spec, child_pid, container_id)?;
+
+    cgroups::handle(&spec, child_pid)?;
+
+    #[cfg(feature = "dbg")] {
+        woody!("[woody] Maps written.");
+        woody!("[woody] Signaling child to continue.");
+    }
+
+    // Sinalize to OK to child
+    write(pipe_write_fd, &[1]).context("write to pipe failed")?;
+    // Write is not needed anymore
+    close(pipe_write_fd)?;
+
+    woody!("Process running with PID: {}.", &child_pid);
+
+    #[cfg(feature = "dbg")] {
+        woody!("Poll loop exited");
+        woody!("Waiting for child process {}", child_pid);
+    }
+
+    if !detach {
+        crate::it::interactive_mode(master_fd)?;
+        waitpid(child_pid, None).context("waitpid() failed")?;
+    }
+
+    #[cfg(feature = "dbg")]
+    woody!("waitpid finished");
 
     woody!("Process exited.");
 
