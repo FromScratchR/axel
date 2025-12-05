@@ -15,7 +15,7 @@ mod consts;
 use anyhow::Context;
 use clap::Parser;
 use nix::{
-    pty::openpty, sched::clone, sys::wait::waitpid, unistd::{close, dup2, setsid, write, ForkResult}
+    sys::wait::waitpid, unistd::ForkResult
 };
 use oci_spec::runtime::{Spec};
 use std::{
@@ -92,6 +92,8 @@ fn spawn_container(
     // This create a decoupled monitor process which handles the cleanup and metrics of the container
     match unsafe { nix::unistd::fork() } {
         Ok(ForkResult::Parent { child: monitor_pid } ) => {
+            woody!("Container is up on PID {}", monitor_pid) ;
+
             if it {
                 waitpid(monitor_pid, None)?;
             }
@@ -114,8 +116,6 @@ fn spawn_container(
         woody!("Cloned child with PID: {}", child_pid);
         woody!("Writing map files for child {}", child_pid);
     }
-
-    woody!("Process exited.");
 
     Ok(0)
 }
