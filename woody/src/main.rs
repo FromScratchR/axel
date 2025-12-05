@@ -15,7 +15,7 @@ mod consts;
 use anyhow::Context;
 use clap::Parser;
 use nix::{
-    sys::wait::waitpid, unistd::ForkResult
+    sys::wait::waitpid, unistd::{close, ForkResult}
 };
 use oci_spec::runtime::{Spec};
 use std::{
@@ -88,18 +88,35 @@ fn spawn_container(
     container_id: &String,
     it: bool,
 ) -> anyhow::Result<i32> {
+    let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?; 
     // Init double-fork pattern
     // This create a decoupled monitor process which handles the cleanup and metrics of the container
     match unsafe { nix::unistd::fork() } {
         Ok(ForkResult::Parent { child: monitor_pid } ) => {
-            woody!("Container is up on PID {}", monitor_pid) ;
+            close(pipe_write_fd)?;
+            let mut buf = [0u8; 32];
+            let mut pos = 0;
+
+            loop {
+                match nix::unistd::read(pipe_read_fd, &mut buf[pos..]) {
+                    Ok(0) =>  break,
+                    Ok(n) => {
+                        pos += n;
+                        if pos >= buf.len() { break; }
+                    }
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(e) => return Err(e.into())
+                }
+            }
+
+            woody!("Container is up on PID {}", str::from_utf8(&buf[..pos])?) ;
 
             if it {
                 waitpid(monitor_pid, None)?;
             }
         },
         Ok(ForkResult::Child) => {
-            monitor::start(container_id, spec, it)?;
+            monitor::start(container_id, pipe_write_fd, spec, it)?;
             let container_pid_path = pids.join(container_id);
 
             std::fs::remove_file(container_pid_path)
