@@ -1,9 +1,9 @@
-use std::{env, ffi::CString, fs::create_dir_all, path::Path, str::FromStr};
+use std::{env, ffi::CString, path::Path, str::FromStr};
 
 use anyhow::Context;
 use caps::{CapSet, CapsHashSet};
 use nix::{
-    mount::{mount, umount2, MntFlags, MsFlags}, pty::openpty, unistd::{close, execvp, pivot_root, read, setgid, setuid, Gid, Uid}
+    mount::{mount, umount2, MntFlags, MsFlags}, unistd::{close, execvp, pivot_root, read, setgid, setuid, Gid, Uid}
 };
 use oci_spec::runtime::{LinuxCapabilities, Spec};
 
@@ -15,12 +15,12 @@ pub fn main(
     pipe_write_fd: i32,
     pipe_read_fd: i32,
     spec: &Spec,
-    it: Option<i32>
+    slave_fd: i32
 ) -> isize {
     close(pipe_write_fd).unwrap();
     wait_for_parent_setup(pipe_read_fd);
 
-    if it.is_some() { it::set_slave(it.unwrap()); }
+    it::set_slave(slave_fd);
 
     configure_hostname(spec);
     configure_fs(spec).expect("Error configuring fs");
