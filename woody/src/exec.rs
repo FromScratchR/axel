@@ -3,6 +3,7 @@ use nix::pty::openpty;
 use nix::sched::{setns, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::{close, fork, ForkResult};
+use oci_spec::runtime::{LinuxNamespaceType, Spec};
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::os::unix::io::AsRawFd;
@@ -21,21 +22,38 @@ pub fn run(pids_path: PathBuf, container_id: String, command: Vec<String>) -> Re
 
     woody!("Attaching to container {} (PID: {})", container_id, target_pid);
 
-    // Open namespace files
-    // Order matters? User NS first usually helps with capabilities.
-    let ns_types = [
-        ("user", CloneFlags::CLONE_NEWUSER),
-        ("mnt", CloneFlags::CLONE_NEWNS),
-        ("ipc", CloneFlags::CLONE_NEWIPC),
-        ("uts", CloneFlags::CLONE_NEWUTS),
-        ("pid", CloneFlags::CLONE_NEWPID),
+    // Load OCI Spec to determine active namespaces
+    let config_path = PathBuf::from("axel-bundles").join(&container_id).join("config.json");
+    let spec = Spec::load(&config_path)
+        .with_context(|| format!("Failed to load OCI spec from {:?}", config_path))?;
+
+    // Collect enabled namespace types from spec
+    let enabled_ns: Vec<LinuxNamespaceType> = spec.linux()
+        .as_ref()
+        .and_then(|l| l.namespaces().as_ref())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ns| ns.typ())
+        .collect();
+
+    // Map logic: define all supported namespaces and their flags
+    let supported_ns = [
+        ("user", CloneFlags::CLONE_NEWUSER, LinuxNamespaceType::User),
+        ("mnt", CloneFlags::CLONE_NEWNS, LinuxNamespaceType::Mount),
+        ("ipc", CloneFlags::CLONE_NEWIPC, LinuxNamespaceType::Ipc),
+        ("uts", CloneFlags::CLONE_NEWUTS, LinuxNamespaceType::Uts),
+        ("net", CloneFlags::CLONE_NEWNET, LinuxNamespaceType::Network),
+        ("pid", CloneFlags::CLONE_NEWPID, LinuxNamespaceType::Pid),
     ];
 
     let mut ns_fds = Vec::new();
-    for (ns_name, _) in ns_types.iter() {
-        let ns_path = format!("/proc/{}/ns/{}", target_pid, ns_name);
-        let f = File::open(&ns_path).with_context(|| format!("Failed to open ns {}", ns_path))?;
-        ns_fds.push((f, ns_name));
+    for (ns_name, _, ns_type) in supported_ns.iter() {
+        if enabled_ns.contains(ns_type) {
+            let ns_path = format!("/proc/{}/ns/{}", target_pid, ns_name);
+            let f = File::open(&ns_path).with_context(|| format!("Failed to open ns {}", ns_path))?;
+            ns_fds.push((f, ns_name));
+        }
     }
 
     // Setup PTY
