@@ -12,7 +12,7 @@ use crate::{cgroups, consts, container, devices, it, ns, ugid};
 /// It is responsible primarly for removing the process PID from ${pids-folder};
 ///
 ///
-pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
+pub fn start(ctn_id: &String, woody_write_fd: i32, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
     let flags = ns::resolve_flags(spec)?;
     #[cfg(feature = "dbg-flags")]
     println!("[woody] using {:?} flags", flags);
@@ -38,11 +38,20 @@ pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
 
     let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
     let ctn_pid = clone(
-        Box::new(|| container::main(pipe_write_fd, pipe_read_fd, spec, slave_fd)),
+        Box::new(|| {
+            // Close the pipe write end inherited from monitor to prevent hanging the parent
+            close(woody_write_fd).ok();
+            container::main(pipe_write_fd, pipe_read_fd, spec, slave_fd)
+        }),
         &mut vec![0; consts::CONTAINER_STACK_SIZE],
         flags,
         Some(SIGCHLD)
     )?;
+
+    // Send PID to woody
+    nix::unistd::write(woody_write_fd, ctn_pid.to_string().as_bytes())?;
+    close(woody_write_fd)?;
+
     // Slave_fd is not needed here anymore
     close(slave_fd)?;
     close(pipe_read_fd)?;
