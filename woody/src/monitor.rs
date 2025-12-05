@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use anyhow::Context;
 use nix::{libc::SIGCHLD, sched::clone, sys::wait::waitpid, unistd::{close, write, Pid}};
 use oci_spec::runtime::Spec;
 
@@ -20,7 +23,7 @@ pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
     // Coerce it type
     let it = if it == true { Some(slave_fd) } else { None };
 
-    let (pipe_write_fd, pipe_read_fd) = nix::unistd::pipe()?;
+    let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
     let ctn_pid = clone(
         Box::new(|| container::main(pipe_write_fd, pipe_read_fd, spec, it)),
         &mut vec![0; consts::CONTAINER_STACK_SIZE],
@@ -28,14 +31,19 @@ pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
         Some(SIGCHLD)
     )?;
 
+    close(slave_fd)?;
     close(pipe_read_fd)?;
 
+    // Configure container process
     ugid::map_ugid(ctn_pid, spec.linux().as_ref())?;
     devices::apply_device_rules(spec, ctn_pid, ctn_id)?;
     cgroups::handle(&spec, ctn_pid)?;
 
+    // Signal child to continue
     write(pipe_write_fd, &[1])?;
     close(pipe_write_fd)?;
+
+    write_ctn_pid(ctn_id, ctn_pid)?;
 
     if it.is_some() {
         it::interactive_mode(master_fd)?;
@@ -45,4 +53,14 @@ pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
     waitpid(ctn_pid, None)?;
 
     Ok(ctn_pid)
+}
+
+fn write_ctn_pid(ctn_id: &String, ctn_pid: Pid) -> anyhow::Result<()> {
+    let pids_path = PathBuf::from("./axel-pids");
+    let ctn_pid_path = pids_path.join(ctn_id);
+
+    std::fs::write(ctn_pid_path, ctn_pid.as_raw().to_string())
+    .context("Could not write container PID")?;
+
+    Ok(())
 }
