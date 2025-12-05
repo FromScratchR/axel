@@ -30,7 +30,7 @@ enum Commands {
         /// The command to run in the container
         command: Vec<String>,
 
-        #[arg(short, long)]
+        #[arg(short='i', long)]
         interactive: bool
     },
     /// Connects into a running image
