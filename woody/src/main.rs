@@ -42,7 +42,7 @@ enum OciCommand {
         #[arg(short, long)]
         pids_path: PathBuf,
         #[arg(short, long)]
-        it: bool,
+        interactive: bool,
         container_id: String,
     },
     /// Execute a command in a running container
@@ -64,11 +64,11 @@ fn main() -> anyhow::Result<()> {
             bundle,
             pids_path,
             container_id,
-            it,
+            interactive,
         } => {
             let spec_path = bundle.join("config.json");
             let spec = Spec::load(spec_path).context("Failed to load OCI spec")?;
-            spawn_container(&spec, &pids_path, &container_id, it)?;
+            spawn_container(&spec, &pids_path, &container_id, interactive)?;
         }
         OciCommand::Exec {
             pids_path,
@@ -97,11 +97,11 @@ fn spawn_container(
             }
         },
         Ok(ForkResult::Child) => {
-            let container_pid = monitor::start(container_id, spec, it).unwrap();
+            monitor::start(container_id, spec, it)?;
             let container_pid_path = pids.join(container_id);
 
-            std::fs::write(container_pid_path, container_pid.as_raw().to_string())
-            .context("Could not write container PID")?;
+            std::fs::remove_file(container_pid_path)
+                .context("Could not remove container PID")?;
 
             std::process::exit(0)
         }
