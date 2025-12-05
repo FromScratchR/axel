@@ -105,6 +105,7 @@ fn pool(term_fd: i32, master_fd: i32) -> anyhow::Result<()> {
 pub fn set_slave(slave_fd: i32) {
     // Set new terminal session as detached
     setsid().unwrap();
+
     // Generate section master fn
     nix::ioctl_write_int_bad!(tiocsctty, nix::libc::TIOCSCTTY);
     // Set section master
