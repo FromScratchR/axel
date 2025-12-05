@@ -4,11 +4,11 @@
 
 A experimental daemonless container management tool.
 
-- **Rootless**: Do not require high-privilege users in order to run.
-- **No Daemons**: Do not lie on background services to work.
-- **Lightweight**: **~[]x**mb binary size.
-- **Self-Contained**: Requires no external deps.
-- **Easy-to-Use**: Simple commands executes the entire workflow.
+- 🫚 **Rootless**: Do not require high-privilege users in order to run.
+- 👹 **No Daemons**: Do not lie on background services to work.
+- 🪶 **Lightweight**: **~[]x**mb binary size.
+- 📦 **Self-Contained**: Requires no external deps.
+- 🛌 **Easy-to-Use**: Simple commands executes the entire workflow.
 
 Axel doesn't depends on daemons and has it's own hand-crafted container runtime, *woody* which works like *runc*.
 
@@ -18,6 +18,8 @@ It is very lightweight and runs on a simple spawned process managed by Woody whi
 And the best: it is rootless; What greatly reduces the surface of security attacks.
 
 > 💡 Unlike Docker it doesn't depends on a daemon like _dockerd_, containers are managed entirelly using Axel and it's back-end: Woody.
+
+## 🖲️ Usage
 
 <div align='center'>
     <img src='.github/demo.gif' alt='axel demo' />
