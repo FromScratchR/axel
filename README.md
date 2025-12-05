@@ -17,12 +17,11 @@ The project's main goal is to learn what really containers are, how they are mad
 It is very lightweight and runs on a simple spawned process managed by Woody which does not require a daemon in order to run, looks much more like a youki/Podman than a Docker.
 And the best: it is rootless; What greatly reduces the surface of security attacks.
 
-> 💡 Unlike Podman it doesn't depends on a daemon like _conmon_ or _dockerd_ like Docker, containers are managed entirelly using Axel and it's back-end: Woody.
+> 💡 Unlike Docker it doesn't depends on a daemon like _dockerd_, containers are managed entirelly using Axel and it's back-end: Woody.
 
 <div align='center'>
     <img src='.github/demo.gif' alt='axel demo' />
 </div>
-
 
 ## How to Use
 
