@@ -30,8 +30,8 @@ enum Commands {
         /// The command to run in the container
         command: Vec<String>,
 
-        #[arg(short='d', long)]
-        detach: bool
+        #[arg(short, long)]
+        interactive: bool
     },
     /// Connects into a running image
     Hook {
@@ -51,8 +51,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { image, command, detach } => {
-            run_container(&image, command, detach).await?;
+        Commands::Run { image, command, interactive } => {
+            run_container(&image, command, interactive).await?;
         }
         Commands::Hook { container_id, command } => {
             hook_container(container_id, command)?;
@@ -127,7 +127,7 @@ fn list_containers() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> anyhow::Result<()> {
+async fn run_container(image_ref: &str, command: Vec<String>, it: bool) -> anyhow::Result<()> {
     let container_name = utils::normalize_container_id(image_ref);
 
     let image_base_path = PathBuf::from(format!("./axel-images/{}", container_name));
@@ -231,8 +231,8 @@ async fn run_container(image_ref: &str, command: Vec<String>, detach: bool) -> a
             .arg(container_name.clone());
     }
 
-    // -d mode
-    if detach { cmd.arg("--detach"); }
+    // it mode
+    if it { cmd.arg("--interactive"); }
 
     axel!("Executing woody command: {:?}", cmd);
 
