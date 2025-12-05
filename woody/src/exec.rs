@@ -19,7 +19,6 @@ use crate::macros::{woody, woody_err};
 
 pub fn run(pids_path: PathBuf, container_id: String, command: Vec<String>) -> Result<()> {
     let pid_path = pids_path.join(&container_id);
-    dbg!(&pid_path);
 
     let pid_str = fs::read_to_string(&pid_path)
         .with_context(|| format!("Failed to read PID file for {}", container_id))?;
