@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use nix::{libc::SIGCHLD, sched::clone, sys::wait::waitpid, unistd::{close, write, Pid}};
+use nix::{libc::SIGCHLD, sched::clone, sys::wait::waitpid, unistd::{close, dup2, write, Pid}};
 use oci_spec::runtime::Spec;
 
 use crate::{cgroups, consts, container, devices, it, ns, ugid};
@@ -17,20 +17,33 @@ pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
     #[cfg(feature = "dbg-flags")]
     println!("[woody] using {:?} flags", flags);
 
+    if !it {
+        let null_path = PathBuf::from("/dev/null");
+        let null_fd = nix::fcntl::open(
+            &null_path,
+            nix::fcntl::OFlag::O_RDWR,
+            nix::sys::stat::Mode::empty()
+        )?;
+
+        dup2(null_fd, 0)?;
+        dup2(null_fd, 1)?;
+        dup2(null_fd, 2)?;
+        if null_fd > 2 {
+            close(null_fd)?;
+        }
+    }
+
     let term = nix::pty::openpty(None, None)?;
     let (master_fd, slave_fd) = (term.master, term.slave);
 
-    // Coerce it type
-    let it = if it == true { Some(slave_fd) } else { None };
-
     let (pipe_read_fd, pipe_write_fd) = nix::unistd::pipe()?;
     let ctn_pid = clone(
-        Box::new(|| container::main(pipe_write_fd, pipe_read_fd, spec, it)),
+        Box::new(|| container::main(pipe_write_fd, pipe_read_fd, spec, slave_fd)),
         &mut vec![0; consts::CONTAINER_STACK_SIZE],
         flags,
         Some(SIGCHLD)
     )?;
-
+    // Slave_fd is not needed here anymore
     close(slave_fd)?;
     close(pipe_read_fd)?;
 
@@ -45,12 +58,16 @@ pub fn start(ctn_id: &String, spec: &Spec, it: bool) -> anyhow::Result<Pid> {
 
     write_ctn_pid(ctn_id, ctn_pid)?;
 
-    if it.is_some() {
+    if it {
         it::interactive_mode(master_fd)?;
-    };
+    }
 
-    close(master_fd)?;
     waitpid(ctn_pid, None)?;
+
+    // Close on process exit
+    if it {
+        close(master_fd)?;
+    }
 
     Ok(ctn_pid)
 }
