@@ -211,7 +211,7 @@ async fn run_container(image_ref: &str, command: Vec<String>, it: bool) -> anyho
 
     let mut cmd;
     if has_systemd {
-        axel!("Detected systemd-run. Wrapping woody to enable Cgroup delegation.");
+        // axel!("Detected systemd-run. Wrapping woody to enable Cgroup delegation.");
         cmd = Command::new("systemd-run");
         cmd.arg("--user")
             .arg("--scope")
@@ -234,7 +234,7 @@ async fn run_container(image_ref: &str, command: Vec<String>, it: bool) -> anyho
     // it mode
     if it { cmd.arg("--interactive"); }
 
-    axel!("Executing woody command: {:?}", cmd);
+    // axel!("Executing woody command: {:?}", cmd);
 
     let status = cmd.status()?;
     if !status.success() {

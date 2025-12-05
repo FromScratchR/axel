@@ -20,6 +20,7 @@ pub fn run(pids_path: PathBuf, container_id: String, command: Vec<String>) -> Re
         .with_context(|| format!("Failed to read PID file for {}", container_id))?;
     let target_pid = pid_str.trim();
 
+    #[cfg(feature = "dbg")]
     woody!("Attaching to container {} (PID: {})", container_id, target_pid);
 
     // Load OCI Spec to determine active namespaces
@@ -65,6 +66,7 @@ pub fn run(pids_path: PathBuf, container_id: String, command: Vec<String>) -> Re
         Ok(ForkResult::Parent { child }) => {
             close(slave_fd)?;
 
+            #[cfg(feature = "dbg")]
             woody!("Child process spawned: {}", child);
 
             it::interactive_mode(master_fd)?;
@@ -72,7 +74,6 @@ pub fn run(pids_path: PathBuf, container_id: String, command: Vec<String>) -> Re
         }
         Ok(ForkResult::Child) => {
             close(master_fd).unwrap();
-            dbg!(&ns_fds);
 
             // Enter namespaces
             for (file, name) in ns_fds {
