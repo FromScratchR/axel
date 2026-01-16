@@ -14,7 +14,7 @@ Axel doesn't depends on daemons and has it's own hand-crafted container runtime,
 
 The project's main goal is to learn what really containers are, how they are made and how they work, as well as to develop something valuable on the path;
 
-It is very lightweight and runs on a simple spawned process managed by Woody which does not require a daemon in order to run, looks much more like a youki/Podman than a Docker.
+It is very lightweight and runs on a simple spawned process managed by Woody which, again, does not require a daemon in order to run, looks much more like a youki/Podman than a Docker.
 And the best: it is rootless; What greatly reduces the surface of security attacks.
 
 > 💡 Unlike Docker it doesn't depends on a daemon like _dockerd_, containers are managed entirelly using Axel and it's back-end: Woody.
