@@ -6,7 +6,7 @@ A experimental daemonless container management tool.
 
 - 🫚 **Rootless**: Do not require high-privilege users in order to run.
 - 👹 **No Daemons**: Do not lie on background services to work.
-- 🪶 **Lightweight**: **~[]x**mb binary size.
+- 🪶 **Lightweight**: ~5.6mb binary size.
 - 📦 **Self-Contained**: Requires no external deps.
 - 🛌 **Easy-to-Use**: Simple commands executes the entire workflow.
 
